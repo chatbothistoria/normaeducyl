@@ -8,6 +8,12 @@ import streamlit as st
 from pathlib import Path
 from rank_bm25 import BM25Okapi
 from groq import Groq
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.colors import HexColor
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+import re, io
 
 METADATA_FILE = Path("chunks_metadata.json")
 GROQ_MODEL    = "llama-3.3-70b-versatile"
@@ -243,6 +249,98 @@ def limpiar():
         st.session_state[k] = None if k != "query_text" else ""
 
 
+
+# ── Generación de PDF ──────────────────────────────────────────────────────────
+_C_PURPLE   = HexColor("#4a3f7a")
+_C_LAVENDER = HexColor("#7c6fae")
+_C_LIGHT    = HexColor("#2d2244")
+_C_GREY     = HexColor("#888888")
+_C_ACCENT   = HexColor("#a78bfa")
+
+def _pdf_styles():
+    base = getSampleStyleSheet()
+    def s(name, **kw):
+        return ParagraphStyle(name, parent=base["Normal"], **kw)
+    return {
+        "title":    s("ptitle",    fontSize=18, textColor=_C_PURPLE,
+                      fontName="Helvetica-Bold", spaceAfter=2),
+        "subtitle": s("psubtitle", fontSize=9,  textColor=_C_GREY, spaceAfter=8),
+        "label":    s("plabel",    fontSize=11, textColor=_C_PURPLE,
+                      fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2),
+        "question": s("pquestion", fontSize=11, textColor=_C_LIGHT,
+                      fontName="Helvetica-Oblique", spaceAfter=6),
+        "h2":       s("ph2",       fontSize=11, textColor=_C_PURPLE,
+                      fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=3),
+        "body":     s("pbody",     fontSize=10, textColor=_C_LIGHT, leading=15, spaceAfter=3),
+        "bullet":   s("pbullet",   fontSize=10, textColor=_C_LIGHT,
+                      leading=14, leftIndent=12, spaceAfter=2),
+        "src_head": s("psrc_head", fontSize=10, textColor=_C_LAVENDER,
+                      fontName="Helvetica-Bold", spaceBefore=8, spaceAfter=3),
+        "src_item": s("psrc_item", fontSize=9,  textColor=_C_PURPLE,
+                      leading=13, leftIndent=10, spaceAfter=2),
+    }
+
+
+def _md(text):
+    """Convierte **negrita** a tags reportlab."""
+    return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+
+def _parse_answer(answer: str, styles: dict):
+    flowables = []
+    for line in answer.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            flowables.append(Spacer(1, 4))
+            continue
+        if re.match(r'^#{1,3}\s', stripped):
+            text = re.sub(r'^#{1,3}\s*', '', stripped)
+            text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+            flowables.append(Paragraph(text, styles["h2"]))
+        elif re.match(r'^[-*•]\s', stripped):
+            text = re.sub(r'^[-*•]\s+', '', stripped)
+            flowables.append(Paragraph(f"• &nbsp;{_md(text)}", styles["bullet"]))
+        elif re.match(r'^\d+[\.)]\ ', stripped):
+            m = re.match(r'^(\d+[\.])\ +(.*)', stripped)
+            if m:
+                num, text = m.group(1), m.group(2)
+                flowables.append(Paragraph(f"<b>{num}</b> &nbsp;{_md(text)}", styles["bullet"]))
+            else:
+                flowables.append(Paragraph(_md(stripped), styles["body"]))
+        elif stripped.startswith("**") and stripped.endswith("**"):
+            flowables.append(Paragraph(f"<b>{stripped.strip('*')}</b>", styles["body"]))
+        else:
+            flowables.append(Paragraph(_md(stripped), styles["body"]))
+    return flowables
+
+
+def generate_pdf(query: str, answer: str, sources: list) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=22*mm, rightMargin=22*mm,
+        topMargin=22*mm, bottomMargin=22*mm)
+    styles = _pdf_styles()
+    story = []
+    story.append(Paragraph("Buscador de Normativa Educativa", styles["title"]))
+    story.append(Paragraph("Castilla y León", styles["subtitle"]))
+    story.append(HRFlowable(width="100%", thickness=1, color=_C_ACCENT, spaceAfter=10))
+    story.append(Paragraph("Pregunta:", styles["label"]))
+    story.append(Paragraph(query, styles["question"]))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph("Respuesta:", styles["label"]))
+    story.append(Spacer(1, 4))
+    story.extend(_parse_answer(answer, styles))
+    story.append(Spacer(1, 8))
+    story.append(HRFlowable(width="100%", thickness=0.5,
+                             color=HexColor("#d4c9f7"), spaceAfter=6))
+    story.append(Paragraph("Fuentes consultadas:", styles["src_head"]))
+    for src in sources:
+        label = src.get("label", "")
+        page  = src.get("page_num", "")
+        story.append(Paragraph(f"• &nbsp;{label} — pág. {page}", styles["src_item"]))
+    doc.build(story)
+    return buf.getvalue()
+
 # ── INTERFAZ ───────────────────────────────────────────────────────────────────
 def main():
     st.set_page_config(
@@ -378,6 +476,22 @@ section[data-testid="stSidebar"] { display: none !important; }
                 f'<span class="source-page">Pág. {src["page_num"]}</span></div>',
                 unsafe_allow_html=True,
             )
+        # ── Botón descarga PDF ──
+        pdf_sources = [{"label": get_label(s["doc_name"]), "page_num": s["page_num"]}
+                       for s in deduplicate(st.session_state.results)]
+        pdf_bytes = generate_pdf(
+            st.session_state.query_text,
+            st.session_state.answer,
+            pdf_sources,
+        )
+        st.download_button(
+            label="⬇️ Descargar respuesta en PDF",
+            data=pdf_bytes,
+            file_name="respuesta_normativa.pdf",
+            mime="application/pdf",
+            use_container_width=False,
+        )
+
         with st.expander("🔬 Ver fragmentos recuperados (contexto enviado a la IA)"):
             for i, r in enumerate(st.session_state.results, 1):
                 st.markdown(
