@@ -1,6 +1,6 @@
 """
 app.py  –  Buscador de Normativa Educativa
-Motor: BM25 + búsqueda triple + reranking por Groq + respuesta profunda
+Motor: BM25 + expansión semántica Groq + reranking + respuesta profunda
 """
 
 import json, re, time, io
@@ -16,11 +16,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 METADATA_FILE = Path("chunks_metadata.json")
 GROQ_MODEL    = "llama-3.3-70b-versatile"
-CANDIDATES    = 20   # fragmentos candidatos tras BM25
-FINAL_CHUNKS  = 8    # fragmentos tras reranking que van al prompt final
+CANDIDATES    = 20   # candidatos BM25 antes del reranking
+FINAL_CHUNKS  = 8    # fragmentos finales que llegan a Groq
 MAX_SOURCES   = 5
 
-# ── Diccionarios de etiquetas y URLs ──────────────────────────────────────────
 DOC_LABELS = {
     "01_Ley_Organica_2_2006_LOE_consolidada.pdf":            "LOE – Ley Orgánica 2/2006 de Educación (consolidada)",
     "02_Ley_Organica_3_2020_LOMLOE.pdf":                     "LOMLOE – Ley Orgánica 3/2020",
@@ -105,97 +104,101 @@ DOC_URLS = {
 
 def get_label(fn): return DOC_LABELS.get(fn, fn.replace("_"," ").replace(".pdf",""))
 def get_url(fn):   return DOC_URLS.get(fn, "#")
-def tokenize(t):   return re.findall(r'\b[a-záéíóúüñ]{3,}\b', t.lower())
+
+def tokenize(t):
+    """Tokeniza incluyendo palabras con acento y ñ."""
+    return re.findall(r'[a-záéíóúüñA-ZÁÉÍÓÚÜÑ]{3,}', t.lower())
 
 
 @st.cache_resource(show_spinner=False)
 def load_bm25():
     with open(METADATA_FILE, "r", encoding="utf-8") as f:
         meta = json.load(f)
+    # Filtrar fragmentos basura (< 150 chars)
+    meta = [m for m in meta if len(m["chunk_text"]) >= 150]
     corpus = [tokenize(m["chunk_text"]) for m in meta]
     return BM25Okapi(corpus), meta
 
 
-# ── PASO 1: expansión de consulta ─────────────────────────────────────────────
+# ── PASO 1: análisis semántico completo de la consulta ────────────────────────
 def expand_query(query: str, client: Groq) -> tuple[str, str]:
-    """Genera keywords jurídicas + reformulación formal."""
+    """
+    Groq analiza la consulta como un todo semántico y genera:
+    - keywords: términos jurídico-administrativos del BOE/BOCYL
+    - reformulation: la misma idea en lenguaje normativo formal
+    """
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": (
-                    "Eres experto en normativa educativa española (LOE, LOMLOE, decretos, órdenes, BOCYL, BOE). "
-                    "Para la pregunta recibida responde SOLO con JSON con dos campos:\n"
-                    "- \"keywords\": 10-18 términos técnicos jurídico-administrativos separados por espacios\n"
-                    "- \"reformulation\": la pregunta reescrita en lenguaje normativo formal\n"
-                    "Sin texto adicional, sin markdown."
+                    "Eres experto en normativa educativa española (LOE, LOMLOE, decretos, órdenes de CyL). "
+                    "Analiza semánticamente la pregunta del usuario y responde SOLO con JSON válido, "
+                    "sin markdown, con exactamente dos campos:\n"
+                    "\"keywords\": cadena con 12-20 términos técnicos jurídico-administrativos "
+                    "separados por espacios, tal como aparecen en BOE/BOCYL\n"
+                    "\"reformulation\": la pregunta reescrita en lenguaje normativo formal español\n"
+                    "Ejemplo: {\"keywords\": \"admisión escolarización solicitud...\", "
+                    "\"reformulation\": \"Criterios de admisión del alumnado...\"}"
                 )},
                 {"role": "user", "content": f"Pregunta: {query}"},
             ],
-            temperature=0.0, max_tokens=120, timeout=15,
+            temperature=0.0,
+            max_tokens=200,  # FIX: aumentado de 120 a 200
+            timeout=15,
         )
         raw = re.sub(r"```json|```", "", resp.choices[0].message.content).strip()
         data = json.loads(raw)
-        return data.get("keywords",""), data.get("reformulation","")
+        return data.get("keywords", ""), data.get("reformulation", "")
     except Exception:
         return "", ""
 
 
-# ── PASO 2: recuperación BM25 multi-consulta ──────────────────────────────────
+# ── PASO 2: BM25 triple fusionado ─────────────────────────────────────────────
 def bm25_search(queries: list[str], bm25, meta) -> list[dict]:
-    """Fusiona resultados de varias consultas tomando el score máximo."""
     best: dict[int, float] = {}
     for q in queries:
-        if not q.strip(): continue
+        if not q.strip():
+            continue
         scores = bm25.get_scores(tokenize(q))
         for idx in scores.argsort()[::-1][:CANDIDATES]:
             s = float(scores[idx])
             if idx not in best or s > best[idx]:
                 best[idx] = s
     ranked = sorted(best.items(), key=lambda x: x[1], reverse=True)[:CANDIDATES]
-    results = []
-    for idx, score in ranked:
-        item = meta[idx].copy()
-        item["score"] = score
-        results.append(item)
-    return results
+    return [dict(meta[idx], score=score) for idx, score in ranked]
 
 
-# ── PASO 3: reranking por relevancia con Groq ─────────────────────────────────
+# ── PASO 3: reranking semántico por Groq ──────────────────────────────────────
 def rerank(query: str, candidates: list[dict], client: Groq) -> list[dict]:
-    """
-    Pide a Groq que puntúe cada fragmento del 0 al 10 por relevancia.
-    Devuelve los FINAL_CHUNKS más relevantes.
-    """
-    # Construir lista numerada de fragmentos (truncada para no exceder tokens)
+    """Groq elige semánticamente los fragmentos más útiles para responder."""
     snippets = []
     for i, c in enumerate(candidates, 1):
-        # Usamos solo los primeros 400 chars para el reranking (rápido y barato)
         snippet = c["chunk_text"][:400].replace("\n", " ")
         snippets.append(f"[{i}] {snippet}")
 
     prompt = (
         f"Pregunta: {query}\n\n"
-        f"Fragmentos de normativa educativa:\n" + "\n\n".join(snippets) +
-        f"\n\nDevuelve SOLO un JSON con una lista llamada \"ranking\" que contenga los números "
-        f"de los {FINAL_CHUNKS} fragmentos MÁS relevantes para responder la pregunta, "
-        f"ordenados de mayor a menor relevancia. Ejemplo: {{\"ranking\": [3,1,7,2,5,8,4,6]}}"
+        "Fragmentos de normativa educativa:\n" +
+        "\n\n".join(snippets) +
+        f"\n\nDevuelve SOLO JSON con el campo \"ranking\": lista de los {FINAL_CHUNKS} "
+        "números de fragmento MÁS relevantes, ordenados de mayor a menor utilidad. "
+        f"Ejemplo: {{\"ranking\": [3,1,7,2,5,8,4,6]}}"
     )
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Eres un experto en normativa educativa española. Selecciona los fragmentos más relevantes."},
-                {"role": "user",   "content": prompt},
+                {"role": "system", "content":
+                    "Eres experto en normativa educativa española. "
+                    "Selecciona los fragmentos más relevantes para responder la pregunta."},
+                {"role": "user", "content": prompt},
             ],
-            temperature=0.0, max_tokens=80, timeout=15,
+            temperature=0.0, max_tokens=100, timeout=20,
         )
         raw = re.sub(r"```json|```", "", resp.choices[0].message.content).strip()
-        data = json.loads(raw)
-        ranking = data.get("ranking", [])
-        # Convertir a índices válidos
-        selected = []
-        seen = set()
+        ranking = json.loads(raw).get("ranking", [])
+        selected, seen = [], set()
         for r in ranking:
             idx = int(r) - 1
             if 0 <= idx < len(candidates) and idx not in seen:
@@ -203,21 +206,21 @@ def rerank(query: str, candidates: list[dict], client: Groq) -> list[dict]:
                 seen.add(idx)
             if len(selected) >= FINAL_CHUNKS:
                 break
-        # Si el reranking falla parcialmente, completar con los mejores por BM25
-        if len(selected) < FINAL_CHUNKS:
-            for c in candidates:
-                if c not in selected:
-                    selected.append(c)
-                if len(selected) >= FINAL_CHUNKS:
-                    break
+        # Completar si faltan con los mejores BM25
+        for c in candidates:
+            if len(selected) >= FINAL_CHUNKS:
+                break
+            if c["doc_name"] + str(c["page_num"]) not in {x["doc_name"] + str(x["page_num"]) for x in selected}:
+                selected.append(c)
         return selected
     except Exception:
-        # Si falla el reranking, devolver los mejores por BM25
         return candidates[:FINAL_CHUNKS]
 
 
-# ── PASO 4: generación de respuesta profunda ──────────────────────────────────
+# ── PASO 4: construcción del contexto ─────────────────────────────────────────
 def build_context(chunks: list[dict]) -> str:
+    """FIX: separador correcto (era string literal, no f-string)."""
+    sep = "\n\n" + "=" * 60 + "\n\n"
     parts = []
     for i, r in enumerate(chunks, 1):
         parts.append(
@@ -225,46 +228,44 @@ def build_context(chunks: list[dict]) -> str:
             f"Documento: {get_label(r['doc_name'])} | Página: {r['page_num']}\n"
             f"{r['chunk_text']}"
         )
-    return "\n\n{'='*60}\n\n".join(parts)
+    return sep.join(parts)
 
 
+# ── PASO 5: respuesta profunda ────────────────────────────────────────────────
 def ask_groq(query: str, context: str, client: Groq, retries: int = 3) -> str:
-    system = """Eres un experto en normativa educativa española con dominio profundo de la LOE, LOMLOE, 
-decretos y órdenes educativas de Castilla y León.
+    system = """Eres un experto en normativa educativa española con dominio profundo de la LOE, LOMLOE,
+y los decretos y órdenes educativas de Castilla y León.
 
-Tu tarea es responder preguntas con MÁXIMA PROFUNDIDAD Y DETALLE, basándote EXCLUSIVAMENTE en los 
-fragmentos de normativa proporcionados.
+Tu tarea es responder con MÁXIMA PROFUNDIDAD Y DETALLE basándote EXCLUSIVAMENTE en los fragmentos.
 
-INSTRUCCIONES PARA LA RESPUESTA:
-1. CONTENIDO: Extrae y explica TODA la información relevante que aparezca en los fragmentos:
-   - Artículos y apartados específicos con su numeración exacta
-   - Plazos, fechas, porcentajes y cifras concretas
+INSTRUCCIONES:
+1. EXTRAE TODA la información relevante de los fragmentos:
+   - Artículos con su numeración exacta
+   - Cifras, plazos, porcentajes y fechas concretas
    - Condiciones, requisitos y excepciones
-   - Procedimientos paso a paso cuando los haya
-   - Referencias cruzadas entre normativas si aparecen
+   - Procedimientos paso a paso
+   - Referencias a otras normas si aparecen
 
-2. ESTRUCTURA: Organiza la respuesta de forma clara:
-   - Usa encabezados (##) para separar aspectos distintos del tema
-   - Usa listas numeradas para procedimientos o requisitos ordenados
-   - Usa listas con viñetas para enumeraciones sin orden específico
-   - Cita entre paréntesis el nombre corto de la norma cuando menciones algo concreto
+2. ESTRUCTURA con markdown:
+   - ## para secciones principales
+   - **negrita** para términos clave y cifras importantes
+   - Listas numeradas para procedimientos
+   - Listas con - para enumeraciones
 
-3. RIGOR: 
-   - No omitas datos relevantes presentes en los fragmentos
-   - No generalices cuando hay datos específicos disponibles
-   - Si hay información complementaria entre varios fragmentos, intégrala
-   - Si algo no está en los fragmentos, NO lo incluyas
+3. RIGOR ABSOLUTO:
+   - No omitas datos específicos presentes en los fragmentos
+   - Integra información de varios fragmentos cuando se completen
+   - No añadas nada que no esté en los fragmentos
 
-4. Si la respuesta no se encuentra en ningún fragmento, di exactamente:
-   "No he encontrado información sobre esto en la normativa disponible."
+4. Si la respuesta no está en los fragmentos: "No he encontrado información sobre esto en la normativa disponible."
 
-Responde siempre en español."""
+Responde en español."""
 
     user = (
         f"PREGUNTA: {query}\n\n"
         f"FRAGMENTOS DE NORMATIVA:\n{context}\n\n"
-        "Elabora una respuesta COMPLETA Y DETALLADA con toda la información relevante "
-        "que aparece en los fragmentos anteriores."
+        "Elabora una respuesta COMPLETA Y DETALLADA con toda la información "
+        "relevante de los fragmentos anteriores."
     )
     for intento in range(retries):
         try:
@@ -300,7 +301,7 @@ def deduplicate(results: list[dict]) -> list[dict]:
 
 
 def limpiar():
-    for k, v in [("query_text",""), ("answer",None), ("results",None)]:
+    for k, v in [("query_text", ""), ("answer", None), ("results", None)]:
         st.session_state[k] = v
     st.session_state["clear_counter"] += 1
 
@@ -309,9 +310,9 @@ def limpiar():
 _CP = HexColor("#4a3f7a"); _CL = HexColor("#7c6fae")
 _CB = HexColor("#2d2244"); _CG = HexColor("#888888"); _CA = HexColor("#a78bfa")
 
-def _styles():
+def _pdf_styles():
     b = getSampleStyleSheet()
-    def s(n,**kw): return ParagraphStyle(n, parent=b["Normal"], **kw)
+    def s(n, **kw): return ParagraphStyle(n, parent=b["Normal"], **kw)
     return {
         "title":  s("t",  fontSize=17, textColor=_CP, fontName="Helvetica-Bold", spaceAfter=2),
         "sub":    s("su", fontSize=9,  textColor=_CG, spaceAfter=8),
@@ -330,13 +331,13 @@ def _flow(answer, styles):
     fl = []
     for line in answer.split("\n"):
         s = line.strip()
-        if not s: fl.append(Spacer(1,4)); continue
-        if re.match(r'^#{1,3}\s',s):
-            fl.append(Paragraph(re.sub(r'\*\*(.+?)\*\*',r'\1',re.sub(r'^#{1,3}\s*','',s)), styles["h2"]))
-        elif re.match(r'^[-*•]\s',s):
-            fl.append(Paragraph(f"• &nbsp;{_md(re.sub(r'^[-*•]\s+','',s))}", styles["bullet"]))
-        elif re.match(r'^\d+[\.\)]\s',s):
-            m = re.match(r'^(\d+[\.\)])\s+(.*)',s)
+        if not s: fl.append(Spacer(1, 4)); continue
+        if re.match(r'^#{1,3}\s', s):
+            fl.append(Paragraph(re.sub(r'\*\*(.+?)\*\*', r'\1', re.sub(r'^#{1,3}\s*', '', s)), styles["h2"]))
+        elif re.match(r'^[-*•]\s', s):
+            fl.append(Paragraph(f"• &nbsp;{_md(re.sub(r'^[-*•]\s+', '', s))}", styles["bullet"]))
+        elif re.match(r'^\d+[\.\)]\s', s):
+            m = re.match(r'^(\d+[\.\)])\s+(.*)', s)
             if m: fl.append(Paragraph(f"<b>{m.group(1)}</b> &nbsp;{_md(m.group(2))}", styles["bullet"]))
             else: fl.append(Paragraph(_md(s), styles["body"]))
         else:
@@ -347,17 +348,17 @@ def generate_pdf(query, answer, sources):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=22*mm, rightMargin=22*mm, topMargin=22*mm, bottomMargin=22*mm)
-    st2 = _styles(); story = []
+    st2 = _pdf_styles(); story = []
     story.append(Paragraph("Buscador de Normativa Educativa", st2["title"]))
     story.append(Paragraph("Castilla y León", st2["sub"]))
     story.append(HRFlowable(width="100%", thickness=1, color=_CA, spaceAfter=10))
     story.append(Paragraph("Pregunta:", st2["lbl"]))
     story.append(Paragraph(query, st2["q"]))
-    story.append(Spacer(1,6))
+    story.append(Spacer(1, 6))
     story.append(Paragraph("Respuesta:", st2["lbl"]))
-    story.append(Spacer(1,4))
+    story.append(Spacer(1, 4))
     story.extend(_flow(answer, st2))
-    story.append(Spacer(1,8))
+    story.append(Spacer(1, 8))
     story.append(HRFlowable(width="100%", thickness=0.5, color=HexColor("#d4c9f7"), spaceAfter=6))
     story.append(Paragraph("Fuentes consultadas:", st2["sh"]))
     for src in sources:
@@ -370,17 +371,16 @@ def generate_pdf(query, answer, sources):
 def main():
     st.set_page_config(page_title="Buscador de Normativa Educativa", page_icon="📚", layout="centered")
 
-    for k,v in [("query_text",""),("answer",None),("results",None),("clear_counter",0)]:
-        if k not in st.session_state: st.session_state[k]=v
+    for k, v in [("query_text",""), ("answer",None), ("results",None), ("clear_counter",0)]:
+        if k not in st.session_state:
+            st.session_state[k] = v
 
     st.markdown("""<style>
 .stApp{background-color:#f8f6ff}
 .header-box{background:linear-gradient(135deg,#d6eaff 0%,#ffe8f0 100%);border-radius:18px;
     padding:28px 32px 20px;margin-bottom:28px;box-shadow:0 2px 12px rgba(180,160,220,.13)}
 .header-box h1{color:#4a3f7a;margin:0;font-size:2rem}
-.answer-box{background:#fff;border-left:5px solid #a78bfa;border-radius:12px;padding:22px 26px;
-    margin:18px 0 10px;box-shadow:0 2px 10px rgba(167,139,250,.10);color:#2d2244;
-    font-size:1.02rem;line-height:1.75;white-space:pre-wrap}
+/* FIX: respuesta renderiza markdown vía st.markdown, no div crudo */
 .sources-title{color:#7c6fae;font-weight:600;font-size:.93rem;margin:20px 0 8px;
     letter-spacing:.05em;text-transform:uppercase}
 .source-card{background:#f0ebff;border:1px solid #d4c9f7;border-radius:10px;padding:11px 16px;
@@ -391,13 +391,19 @@ def main():
     font-size:.81rem;font-weight:600;white-space:nowrap;margin-left:auto}
 .stTextArea textarea{border-radius:12px!important;border:1.5px solid #c4b5fd!important;
     font-size:1rem!important;background:#fdfcff!important}
+/* Caja de respuesta con st.markdown */
+.answer-wrapper{background:#fff;border-left:5px solid #a78bfa;border-radius:12px;
+    padding:22px 26px;margin:18px 0 10px;
+    box-shadow:0 2px 10px rgba(167,139,250,.10);color:#2d2244;font-size:1.02rem;line-height:1.75}
 div[data-testid="column"] .stButton>button{width:100%;white-space:nowrap;padding:11px 18px!important;
-    font-size:1rem!important;font-weight:600!important;border-radius:10px!important;border:none!important;line-height:1.2}
+    font-size:1rem!important;font-weight:600!important;border-radius:10px!important;
+    border:none!important;line-height:1.2}
 div[data-testid="column"]:first-child .stButton>button{
     background:linear-gradient(135deg,#a78bfa,#f9a8d4)!important;color:white!important;
     box-shadow:0 2px 8px rgba(167,139,250,.30)!important}
 div[data-testid="column"]:first-child .stButton>button:hover{opacity:.88}
-div[data-testid="column"]:nth-child(2) .stButton>button{background:#ede9fe!important;color:#5b4ba0!important}
+div[data-testid="column"]:nth-child(2) .stButton>button{
+    background:#ede9fe!important;color:#5b4ba0!important}
 div[data-testid="column"]:nth-child(2) .stButton>button:hover{background:#ddd6fe!important}
 section[data-testid="stSidebar"]{display:none!important}
 [data-testid="collapsedControl"]{display:none!important}
@@ -406,7 +412,7 @@ section[data-testid="stSidebar"]{display:none!important}
     st.markdown('<div class="header-box"><h1>📚 Buscador de Normativa Educativa</h1></div>',
                 unsafe_allow_html=True)
 
-    groq_api_key = st.secrets.get("GROQ_API_KEY","")
+    groq_api_key = st.secrets.get("GROQ_API_KEY", "")
     if not groq_api_key:
         st.error("⚠️ Clave GROQ_API_KEY no encontrada en los Secrets de Streamlit.")
         st.stop()
@@ -428,12 +434,13 @@ section[data-testid="stSidebar"]{display:none!important}
         key=f"query_input_{st.session_state.clear_counter}",
     )
 
-    col1, col2, col3 = st.columns([2,2,6])
-    with col1: buscar = st.button("🔍 Buscar", use_container_width=True)
+    col1, col2, col3 = st.columns([2, 2, 6])
+    with col1: buscar      = st.button("🔍 Buscar",  use_container_width=True)
     with col2: limpiar_btn = st.button("🗑️ Limpiar", use_container_width=True)
 
     if limpiar_btn:
-        limpiar(); st.rerun()
+        limpiar()
+        st.rerun()
 
     if buscar:
         if not query.strip():
@@ -441,21 +448,17 @@ section[data-testid="stSidebar"]{display:none!important}
         else:
             st.session_state.query_text = query
 
-            # Paso 1: expansión
-            with st.spinner("🧠 Analizando la consulta..."):
+            with st.spinner("🧠 Analizando la consulta semánticamente..."):
                 keywords, reformulation = expand_query(query, client)
 
-            # Paso 2: BM25 multi-consulta
             with st.spinner("📄 Recuperando fragmentos relevantes..."):
                 queries = [q for q in [query, keywords, reformulation] if q.strip()]
                 candidates = bm25_search(queries, bm25, meta)
 
-            # Paso 3: reranking
             with st.spinner("🎯 Seleccionando los fragmentos más relevantes..."):
                 final_chunks = rerank(query, candidates, client)
                 context = build_context(final_chunks)
 
-            # Paso 4: respuesta profunda
             with st.spinner("🤖 Generando respuesta detallada..."):
                 try:
                     answer = ask_groq(query, context, client)
@@ -464,9 +467,13 @@ section[data-testid="stSidebar"]{display:none!important}
                 except Exception as e:
                     st.error(f"❌ Error: {e}")
 
+    # ── Mostrar respuesta ──
     if st.session_state.answer:
-        st.markdown(f'<div class="answer-box">{st.session_state.answer}</div>',
-                    unsafe_allow_html=True)
+        # FIX: usar st.markdown en lugar de div con white-space:pre-wrap
+        # para que el markdown (##, **, -, 1.) se renderice correctamente
+        st.markdown('<div class="answer-wrapper">', unsafe_allow_html=True)
+        st.markdown(st.session_state.answer)
+        st.markdown('</div>', unsafe_allow_html=True)
 
         sources = deduplicate(st.session_state.results)
         st.markdown('<p class="sources-title">📄 Fuentes consultadas</p>', unsafe_allow_html=True)
@@ -477,7 +484,6 @@ section[data-testid="stSidebar"]{display:none!important}
                 f'<span class="source-page">Pág. {src["page_num"]}</span></div>',
                 unsafe_allow_html=True)
 
-        # Botón PDF
         pdf_sources = [{"label": get_label(s["doc_name"]), "page_num": s["page_num"]}
                        for s in sources]
         pdf_bytes = generate_pdf(st.session_state.query_text,
@@ -487,8 +493,10 @@ section[data-testid="stSidebar"]{display:none!important}
 
         with st.expander("🔬 Ver fragmentos enviados a la IA"):
             for i, r in enumerate(st.session_state.results, 1):
-                st.markdown(f"**[{i}] {get_label(r['doc_name'])} – Pág. {r['page_num']}** "
-                            f"*(BM25: {r['score']:.1f})*\n\n{r['chunk_text']}")
+                st.markdown(
+                    f"**[{i}] {get_label(r['doc_name'])} – Pág. {r['page_num']}** "
+                    f"*(BM25: {r['score']:.1f})*\n\n{r['chunk_text']}"
+                )
                 st.divider()
 
 
