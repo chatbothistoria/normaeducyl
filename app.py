@@ -1,7 +1,5 @@
 """
 app.py  –  Buscador de Normativa Educativa
-Busca exclusivamente en los 38 documentos PDF oficiales.
-Responde mediante el modelo llama-3.3-70b-versatile de Groq.
 """
 
 import pickle, json, time
@@ -13,11 +11,11 @@ from groq import Groq
 INDEX_FILE    = Path("tfidf_index.pkl")
 METADATA_FILE = Path("chunks_metadata.json")
 GROQ_MODEL    = "llama-3.3-70b-versatile"
-TOP_K         = 8    # más fragmentos para mayor cobertura
+TOP_K         = 8
 MAX_SOURCES   = 4
 
-# URL base para descargar los PDFs directamente
-GITHUB_RAW    = "https://raw.githubusercontent.com/chatbothistoria/normaeducyl/main"
+# blob URL → GitHub renderiza el PDF en el navegador (sin descarga)
+GITHUB_BLOB   = "https://github.com/chatbothistoria/normaeducyl/blob/main"
 PDF_FOLDER    = "Normativa_Oficial"
 
 DOC_LABELS = {
@@ -66,8 +64,7 @@ def get_label(fn):
     return DOC_LABELS.get(fn, fn.replace("_", " ").replace(".pdf", ""))
 
 def get_url(fn):
-    # raw.githubusercontent.com abre el PDF directamente en el navegador
-    return f"{GITHUB_RAW}/{PDF_FOLDER}/{fn}"
+    return f"{GITHUB_BLOB}/{PDF_FOLDER}/{fn}"
 
 
 @st.cache_resource(show_spinner=False)
@@ -82,8 +79,6 @@ def load_resources():
 def search(query, vectorizer, matrix, metadata):
     q = vectorizer.transform([query])
     scores = cosine_similarity(q, matrix).flatten()
-    # Tomamos los TOP_K mejores SIN filtro de score mínimo
-    # para garantizar que siempre se devuelven resultados
     top_indices = scores.argsort()[::-1][:TOP_K]
     results = []
     for i in top_indices:
@@ -94,7 +89,6 @@ def search(query, vectorizer, matrix, metadata):
 
 
 def build_context(results):
-    # Limitamos cada fragmento a 500 caracteres para no superar el contexto de Groq
     parts = []
     for i, r in enumerate(results, 1):
         chunk = r["chunk_text"][:500]
@@ -109,19 +103,16 @@ def ask_groq(query, context, api_key, retries=3):
     system = (
         "Eres un asistente experto en normativa educativa española. "
         "Tu ÚNICA fuente de información son los fragmentos de documentos oficiales del contexto. "
-        "REGLAS: "
-        "1) Responde SOLO con la información de los fragmentos. "
+        "REGLAS: 1) Responde SOLO con la información de los fragmentos. "
         "2) Si la respuesta no está en los fragmentos, di exactamente: "
         "'No he encontrado información sobre esto en la normativa disponible.' "
-        "3) Sé claro, preciso y bien estructurado. "
-        "4) Responde siempre en español."
+        "3) Sé claro, preciso y bien estructurado. 4) Responde siempre en español."
     )
     user = (
         f"PREGUNTA: {query}\n\n"
         f"FRAGMENTOS DE NORMATIVA:\n{context}\n\n"
         "Responde basándote exclusivamente en los fragmentos anteriores."
     )
-
     for intento in range(retries):
         try:
             resp = client.chat.completions.create(
@@ -135,17 +126,14 @@ def ask_groq(query, context, api_key, retries=3):
                 timeout=30,
             )
             return resp.choices[0].message.content
-
         except Exception as e:
             msg = str(e)
-            # Límite de tasa: esperamos y reintentamos
             if "rate_limit" in msg.lower() or "429" in msg:
                 wait = 20 * (intento + 1)
-                st.warning(f"Límite de tasa de Groq alcanzado. Reintentando en {wait}s...")
+                st.warning(f"Límite de tasa de Groq. Reintentando en {wait}s...")
                 time.sleep(wait)
             else:
-                raise   # otros errores se propagan directamente
-
+                raise
     raise RuntimeError("No se pudo obtener respuesta de Groq tras varios intentos.")
 
 
@@ -158,28 +146,122 @@ def deduplicate(results):
     return list(seen.values())[:MAX_SOURCES]
 
 
-# ── INTERFAZ ───────────────────────────────────────────────────────────────────
+def limpiar():
+    st.session_state.query_text  = ""
+    st.session_state.answer      = None
+    st.session_state.results     = None
+
+
 def main():
     st.set_page_config(
         page_title="Buscador de Normativa Educativa",
         page_icon="📚",
         layout="centered",
     )
+
+    # Inicializar estado
+    if "query_text" not in st.session_state:
+        st.session_state.query_text = ""
+    if "answer" not in st.session_state:
+        st.session_state.answer = None
+    if "results" not in st.session_state:
+        st.session_state.results = None
+
     st.markdown("""<style>
-.stApp{background-color:#f8f6ff}
-.header-box{background:linear-gradient(135deg,#d6eaff 0%,#ffe8f0 100%);border-radius:18px;padding:28px 32px 20px;margin-bottom:28px;box-shadow:0 2px 12px rgba(180,160,220,.13)}
-.header-box h1{color:#4a3f7a;margin:0 0 6px;font-size:2rem}
-.header-box p{color:#6b5ea8;margin:0;font-size:1.05rem}
-.answer-box{background:#fff;border-left:5px solid #a78bfa;border-radius:12px;padding:22px 26px;margin:18px 0 10px;box-shadow:0 2px 10px rgba(167,139,250,.10);color:#2d2244;font-size:1.02rem;line-height:1.75;white-space:pre-wrap}
-.sources-title{color:#7c6fae;font-weight:600;font-size:.93rem;margin:20px 0 8px;letter-spacing:.05em;text-transform:uppercase}
-.source-card{background:#f0ebff;border:1px solid #d4c9f7;border-radius:10px;padding:11px 16px;margin-bottom:8px;display:flex;align-items:center;gap:10px}
-.source-card a{color:#5b4ba0;text-decoration:none;font-weight:500}
-.source-card a:hover{text-decoration:underline}
-.source-page{background:#c4b5fd;color:#2d2244;border-radius:20px;padding:2px 11px;font-size:.81rem;font-weight:600;white-space:nowrap}
-.stTextArea textarea{border-radius:12px!important;border:1.5px solid #c4b5fd!important;font-size:1rem!important;background:#fdfcff!important}
-.stButton>button{background:linear-gradient(135deg,#a78bfa,#f9a8d4)!important;color:white!important;border:none!important;border-radius:10px!important;padding:10px 32px!important;font-size:1rem!important;font-weight:600!important;box-shadow:0 2px 8px rgba(167,139,250,.25)!important}
-.stButton>button:hover{opacity:.88}
-section[data-testid="stSidebar"]{background:#f0ebff!important}
+.stApp { background-color: #f8f6ff; }
+
+.header-box {
+    background: linear-gradient(135deg, #d6eaff 0%, #ffe8f0 100%);
+    border-radius: 18px;
+    padding: 28px 32px 20px;
+    margin-bottom: 28px;
+    box-shadow: 0 2px 12px rgba(180,160,220,.13);
+}
+.header-box h1 { color: #4a3f7a; margin: 0 0 6px; font-size: 2rem; }
+.header-box p  { color: #6b5ea8; margin: 0; font-size: 1.05rem; }
+
+.answer-box {
+    background: #fff;
+    border-left: 5px solid #a78bfa;
+    border-radius: 12px;
+    padding: 22px 26px;
+    margin: 18px 0 10px;
+    box-shadow: 0 2px 10px rgba(167,139,250,.10);
+    color: #2d2244;
+    font-size: 1.02rem;
+    line-height: 1.75;
+    white-space: pre-wrap;
+}
+.sources-title {
+    color: #7c6fae;
+    font-weight: 600;
+    font-size: .93rem;
+    margin: 20px 0 8px;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+}
+.source-card {
+    background: #f0ebff;
+    border: 1px solid #d4c9f7;
+    border-radius: 10px;
+    padding: 11px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.source-card a { color: #5b4ba0; text-decoration: none; font-weight: 500; }
+.source-card a:hover { text-decoration: underline; }
+.source-page {
+    background: #c4b5fd;
+    color: #2d2244;
+    border-radius: 20px;
+    padding: 2px 11px;
+    font-size: .81rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+/* Área de texto */
+.stTextArea textarea {
+    border-radius: 12px !important;
+    border: 1.5px solid #c4b5fd !important;
+    font-size: 1rem !important;
+    background: #fdfcff !important;
+}
+
+/* Botones: misma altura, texto en una línea */
+div[data-testid="column"] .stButton > button {
+    width: 100%;
+    white-space: nowrap;
+    padding: 11px 18px !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+    border-radius: 10px !important;
+    border: none !important;
+    cursor: pointer;
+    line-height: 1.2;
+}
+
+/* Botón Buscar – degradado morado/rosa */
+div[data-testid="column"]:first-child .stButton > button {
+    background: linear-gradient(135deg, #a78bfa, #f9a8d4) !important;
+    color: white !important;
+    box-shadow: 0 2px 8px rgba(167,139,250,.30) !important;
+}
+div[data-testid="column"]:first-child .stButton > button:hover { opacity: .88; }
+
+/* Botón Limpiar – tono neutro suave */
+div[data-testid="column"]:nth-child(2) .stButton > button {
+    background: #ede9fe !important;
+    color: #5b4ba0 !important;
+    box-shadow: 0 2px 6px rgba(167,139,250,.15) !important;
+}
+div[data-testid="column"]:nth-child(2) .stButton > button:hover {
+    background: #ddd6fe !important;
+}
+
+section[data-testid="stSidebar"] { background: #f0ebff !important; }
 </style>""", unsafe_allow_html=True)
 
     st.markdown("""<div class="header-box">
@@ -210,38 +292,55 @@ Las respuestas se generan <strong>exclusivamente</strong> a partir del contenido
     with st.spinner("Cargando índice..."):
         vectorizer, matrix, metadata = load_resources()
 
+    # Campo de texto ligado a session_state
     query = st.text_area(
         "🔍 ¿Qué quieres consultar?",
+        value=st.session_state.query_text,
         placeholder="Ej: ¿Cuáles son los criterios de admisión en el primer ciclo de Infantil?",
         height=110,
+        key="query_input",
     )
 
-    col1, col2 = st.columns([1, 5])
+    # Botones en la misma fila, mismo tamaño
+    col1, col2, col3 = st.columns([2, 2, 6])
     with col1:
-        buscar = st.button("Buscar", use_container_width=True)
+        buscar = st.button("🔍 Buscar", use_container_width=True)
+    with col2:
+        limpiar_btn = st.button("🗑️ Limpiar", use_container_width=True)
 
+    # Acción Limpiar
+    if limpiar_btn:
+        limpiar()
+        st.rerun()
+
+    # Acción Buscar
     if buscar:
         if not query.strip():
             st.warning("Escribe una pregunta antes de buscar.")
-            return
+        else:
+            st.session_state.query_text = query
 
-        with st.spinner("🔎 Buscando en la normativa..."):
-            results = search(query, vectorizer, matrix, metadata)
-            context = build_context(results)
+            with st.spinner("🔎 Buscando en la normativa..."):
+                results = search(query, vectorizer, matrix, metadata)
+                context = build_context(results)
 
-        with st.spinner("🤖 Generando respuesta con llama-3.3-70b..."):
-            try:
-                answer = ask_groq(query, context, groq_api_key)
-            except Exception as e:
-                st.error(f"❌ Error al obtener respuesta: {e}")
-                st.info("Comprueba que la GROQ_API_KEY en los Secrets es correcta y que tu cuenta tiene crédito disponible.")
-                return
+            with st.spinner("🤖 Generando respuesta con llama-3.3-70b..."):
+                try:
+                    answer = ask_groq(query, context, groq_api_key)
+                    st.session_state.answer  = answer
+                    st.session_state.results = results
+                except Exception as e:
+                    st.error(f"❌ Error al obtener respuesta: {e}")
+                    st.info("Comprueba que la GROQ_API_KEY en los Secrets es correcta.")
 
-        # Respuesta
-        st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
+    # Mostrar respuesta guardada en session_state
+    if st.session_state.answer:
+        st.markdown(
+            f'<div class="answer-box">{st.session_state.answer}</div>',
+            unsafe_allow_html=True,
+        )
 
-        # Fuentes
-        sources = deduplicate(results)
+        sources = deduplicate(st.session_state.results)
         st.markdown('<p class="sources-title">📄 Fuentes consultadas</p>', unsafe_allow_html=True)
         for src in sources:
             st.markdown(
@@ -251,9 +350,8 @@ Las respuestas se generan <strong>exclusivamente</strong> a partir del contenido
                 unsafe_allow_html=True,
             )
 
-        # Detalle de fragmentos
         with st.expander("🔬 Ver fragmentos recuperados (contexto enviado a la IA)"):
-            for i, r in enumerate(results, 1):
+            for i, r in enumerate(st.session_state.results, 1):
                 st.markdown(
                     f"**[{i}] {get_label(r['doc_name'])} – Pág. {r['page_num']}** "
                     f"*(puntuación: {r['score']:.3f})*\n\n{r['chunk_text']}"
