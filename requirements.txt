@@ -3,3 +3,4 @@ groq>=0.9.0
 pypdf>=4.2.0
 scikit-learn>=1.4.0
 numpy>=1.26.0
+rank-bm25>=0.2.2
