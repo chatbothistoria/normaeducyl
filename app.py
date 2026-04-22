@@ -302,6 +302,7 @@ def deduplicate(results: list[dict]) -> list[dict]:
 def limpiar():
     for k, v in [("query_text",""), ("answer",None), ("results",None)]:
         st.session_state[k] = v
+    st.session_state["clear_counter"] += 1
 
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
@@ -369,7 +370,7 @@ def generate_pdf(query, answer, sources):
 def main():
     st.set_page_config(page_title="Buscador de Normativa Educativa", page_icon="📚", layout="centered")
 
-    for k,v in [("query_text",""),("answer",None),("results",None)]:
+    for k,v in [("query_text",""),("answer",None),("results",None),("clear_counter",0)]:
         if k not in st.session_state: st.session_state[k]=v
 
     st.markdown("""<style>
@@ -424,6 +425,7 @@ section[data-testid="stSidebar"]{display:none!important}
         value=st.session_state.query_text,
         placeholder="Ej: ¿Cuáles son los criterios y el procedimiento de admisión en el primer ciclo de Infantil?",
         height=110,
+        key=f"query_input_{st.session_state.clear_counter}",
     )
 
     col1, col2, col3 = st.columns([2,2,6])
