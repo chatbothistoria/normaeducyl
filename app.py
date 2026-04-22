@@ -302,6 +302,8 @@ def deduplicate(results: list[dict]) -> list[dict]:
 def limpiar():
     for k, v in [("query_text",""), ("answer",None), ("results",None)]:
         st.session_state[k] = v
+    # Borrar también el widget directamente
+    st.session_state["query_input"] = ""
 
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
