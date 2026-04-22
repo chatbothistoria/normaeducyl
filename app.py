@@ -302,8 +302,6 @@ def deduplicate(results: list[dict]) -> list[dict]:
 def limpiar():
     for k, v in [("query_text",""), ("answer",None), ("results",None)]:
         st.session_state[k] = v
-    # Borrar también el widget directamente
-    st.session_state["query_input"] = ""
 
 
 # ── PDF ───────────────────────────────────────────────────────────────────────
@@ -425,7 +423,7 @@ section[data-testid="stSidebar"]{display:none!important}
         "🔍 ¿Qué quieres consultar?",
         value=st.session_state.query_text,
         placeholder="Ej: ¿Cuáles son los criterios y el procedimiento de admisión en el primer ciclo de Infantil?",
-        height=110, key="query_input",
+        height=110,
     )
 
     col1, col2, col3 = st.columns([2,2,6])
