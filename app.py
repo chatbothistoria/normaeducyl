@@ -4,7 +4,7 @@ Busca exclusivamente en los 38 documentos PDF oficiales.
 Responde mediante el modelo llama-3.3-70b-versatile de Groq.
 """
 
-import pickle, json
+import pickle, json, time
 import streamlit as st
 from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
@@ -13,11 +13,11 @@ from groq import Groq
 INDEX_FILE    = Path("tfidf_index.pkl")
 METADATA_FILE = Path("chunks_metadata.json")
 GROQ_MODEL    = "llama-3.3-70b-versatile"
-TOP_K         = 6
+TOP_K         = 8    # más fragmentos para mayor cobertura
 MAX_SOURCES   = 4
 
-# 👇 Cambia esto por la URL de tu repositorio en GitHub
-GITHUB_REPO   = "https://github.com/TU_USUARIO/TU_REPOSITORIO"
+# URL base para descargar los PDFs directamente
+GITHUB_RAW    = "https://raw.githubusercontent.com/chatbothistoria/normaeducyl/main"
 PDF_FOLDER    = "Normativa_Oficial"
 
 DOC_LABELS = {
@@ -62,61 +62,109 @@ DOC_LABELS = {
 }
 
 
-def get_label(fn):  return DOC_LABELS.get(fn, fn.replace("_"," ").replace(".pdf",""))
-def get_url(fn):    return f"{GITHUB_REPO}/blob/main/{PDF_FOLDER}/{fn}"
+def get_label(fn):
+    return DOC_LABELS.get(fn, fn.replace("_", " ").replace(".pdf", ""))
+
+def get_url(fn):
+    # raw.githubusercontent.com abre el PDF directamente en el navegador
+    return f"{GITHUB_RAW}/{PDF_FOLDER}/{fn}"
 
 
 @st.cache_resource(show_spinner=False)
 def load_resources():
-    with open(INDEX_FILE,"rb") as f: data = pickle.load(f)
-    with open(METADATA_FILE,"r",encoding="utf-8") as f: meta = json.load(f)
+    with open(INDEX_FILE, "rb") as f:
+        data = pickle.load(f)
+    with open(METADATA_FILE, "r", encoding="utf-8") as f:
+        meta = json.load(f)
     return data["vectorizer"], data["matrix"], meta
 
 
 def search(query, vectorizer, matrix, metadata):
     q = vectorizer.transform([query])
     scores = cosine_similarity(q, matrix).flatten()
-    top = scores.argsort()[::-1][:TOP_K]
+    # Tomamos los TOP_K mejores SIN filtro de score mínimo
+    # para garantizar que siempre se devuelven resultados
+    top_indices = scores.argsort()[::-1][:TOP_K]
     results = []
-    for i in top:
-        if scores[i] > 0:
-            item = metadata[i].copy(); item["score"] = float(scores[i])
-            results.append(item)
+    for i in top_indices:
+        item = metadata[i].copy()
+        item["score"] = float(scores[i])
+        results.append(item)
     return results
 
 
 def build_context(results):
+    # Limitamos cada fragmento a 500 caracteres para no superar el contexto de Groq
     parts = []
-    for i,r in enumerate(results,1):
-        parts.append(f"[Fragmento {i}] Documento: «{get_label(r['doc_name'])}» | Página: {r['page_num']}\n{r['chunk_text']}")
+    for i, r in enumerate(results, 1):
+        chunk = r["chunk_text"][:500]
+        parts.append(
+            f"[Fragmento {i}] Documento: «{get_label(r['doc_name'])}» | Página: {r['page_num']}\n{chunk}"
+        )
     return "\n\n---\n\n".join(parts)
 
 
-def ask_groq(query, context, api_key):
+def ask_groq(query, context, api_key, retries=3):
     client = Groq(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role":"system","content":"""Eres un asistente experto en normativa educativa española.
-Tu ÚNICA fuente de información son los fragmentos de documentos oficiales del contexto.
-REGLAS: 1) Responde SOLO con la información de los fragmentos. 2) Si la respuesta no está, di exactamente: "No he encontrado información sobre esto en la normativa disponible." 3) Sé claro y preciso. 4) Responde siempre en español."""},
-            {"role":"user","content":f"PREGUNTA: {query}\n\nFRAGMENTOS DE NORMATIVA:\n{context}\n\nResponde basándote exclusivamente en los fragmentos anteriores."},
-        ],
-        temperature=0.1, max_tokens=1500,
+    system = (
+        "Eres un asistente experto en normativa educativa española. "
+        "Tu ÚNICA fuente de información son los fragmentos de documentos oficiales del contexto. "
+        "REGLAS: "
+        "1) Responde SOLO con la información de los fragmentos. "
+        "2) Si la respuesta no está en los fragmentos, di exactamente: "
+        "'No he encontrado información sobre esto en la normativa disponible.' "
+        "3) Sé claro, preciso y bien estructurado. "
+        "4) Responde siempre en español."
     )
-    return resp.choices[0].message.content
+    user = (
+        f"PREGUNTA: {query}\n\n"
+        f"FRAGMENTOS DE NORMATIVA:\n{context}\n\n"
+        "Responde basándote exclusivamente en los fragmentos anteriores."
+    )
+
+    for intento in range(retries):
+        try:
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                temperature=0.1,
+                max_tokens=1024,
+                timeout=30,
+            )
+            return resp.choices[0].message.content
+
+        except Exception as e:
+            msg = str(e)
+            # Límite de tasa: esperamos y reintentamos
+            if "rate_limit" in msg.lower() or "429" in msg:
+                wait = 20 * (intento + 1)
+                st.warning(f"Límite de tasa de Groq alcanzado. Reintentando en {wait}s...")
+                time.sleep(wait)
+            else:
+                raise   # otros errores se propagan directamente
+
+    raise RuntimeError("No se pudo obtener respuesta de Groq tras varios intentos.")
 
 
 def deduplicate(results):
-    seen={}
+    seen = {}
     for r in results:
-        k=r["doc_name"]
-        if k not in seen or r["score"]>seen[k]["score"]: seen[k]=r
+        k = r["doc_name"]
+        if k not in seen or r["score"] > seen[k]["score"]:
+            seen[k] = r
     return list(seen.values())[:MAX_SOURCES]
 
 
+# ── INTERFAZ ───────────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="Buscador de Normativa Educativa", page_icon="📚", layout="centered")
+    st.set_page_config(
+        page_title="Buscador de Normativa Educativa",
+        page_icon="📚",
+        layout="centered",
+    )
     st.markdown("""<style>
 .stApp{background-color:#f8f6ff}
 .header-box{background:linear-gradient(135deg,#d6eaff 0%,#ffe8f0 100%);border-radius:18px;padding:28px 32px 20px;margin-bottom:28px;box-shadow:0 2px 12px rgba(180,160,220,.13)}
@@ -148,37 +196,51 @@ Las respuestas se generan <strong>exclusivamente</strong> a partir del contenido
 
     with st.sidebar:
         st.markdown("#### 📋 Documentos disponibles")
-        st.markdown("<small style='color:#6b5ea8'>"+"<br>".join(f"• {v}" for v in DOC_LABELS.values())+"</small>", unsafe_allow_html=True)
+        st.markdown(
+            "<small style='color:#6b5ea8'>" +
+            "<br>".join(f"• {v}" for v in DOC_LABELS.values()) +
+            "</small>",
+            unsafe_allow_html=True,
+        )
 
     if not INDEX_FILE.exists():
-        st.error("Índice no encontrado. Sube `tfidf_index.pkl` y `chunks_metadata.json` al repositorio.")
+        st.error("Índice no encontrado. Asegúrate de que `tfidf_index.pkl` está en el repositorio.")
         return
 
     with st.spinner("Cargando índice..."):
         vectorizer, matrix, metadata = load_resources()
 
-    query = st.text_area("🔍 ¿Qué quieres consultar?",
+    query = st.text_area(
+        "🔍 ¿Qué quieres consultar?",
         placeholder="Ej: ¿Cuáles son los criterios de admisión en el primer ciclo de Infantil?",
-        height=110)
+        height=110,
+    )
 
-    col1, col2 = st.columns([1,5])
+    col1, col2 = st.columns([1, 5])
     with col1:
         buscar = st.button("Buscar", use_container_width=True)
 
     if buscar:
-        if not query.strip(): st.warning("Escribe una pregunta antes de buscar."); return
+        if not query.strip():
+            st.warning("Escribe una pregunta antes de buscar.")
+            return
 
         with st.spinner("🔎 Buscando en la normativa..."):
             results = search(query, vectorizer, matrix, metadata)
-        if not results: st.info("No se encontraron fragmentos relevantes."); return
+            context = build_context(results)
 
-        context = build_context(results)
         with st.spinner("🤖 Generando respuesta con llama-3.3-70b..."):
-            try:    answer = ask_groq(query, context, groq_api_key)
-            except Exception as e: st.error(f"Error con Groq: {e}"); return
+            try:
+                answer = ask_groq(query, context, groq_api_key)
+            except Exception as e:
+                st.error(f"❌ Error al obtener respuesta: {e}")
+                st.info("Comprueba que la GROQ_API_KEY en los Secrets es correcta y que tu cuenta tiene crédito disponible.")
+                return
 
+        # Respuesta
         st.markdown(f'<div class="answer-box">{answer}</div>', unsafe_allow_html=True)
 
+        # Fuentes
         sources = deduplicate(results)
         st.markdown('<p class="sources-title">📄 Fuentes consultadas</p>', unsafe_allow_html=True)
         for src in sources:
@@ -186,11 +248,16 @@ Las respuestas se generan <strong>exclusivamente</strong> a partir del contenido
                 f'<div class="source-card"><span>📄</span>'
                 f'<a href="{get_url(src["doc_name"])}" target="_blank">{get_label(src["doc_name"])}</a>'
                 f'<span class="source-page">Pág. {src["page_num"]}</span></div>',
-                unsafe_allow_html=True)
+                unsafe_allow_html=True,
+            )
 
+        # Detalle de fragmentos
         with st.expander("🔬 Ver fragmentos recuperados (contexto enviado a la IA)"):
-            for i,r in enumerate(results,1):
-                st.markdown(f"**[{i}] {get_label(r['doc_name'])} – Pág. {r['page_num']}** *(puntuación: {r['score']:.3f})*\n\n{r['chunk_text']}")
+            for i, r in enumerate(results, 1):
+                st.markdown(
+                    f"**[{i}] {get_label(r['doc_name'])} – Pág. {r['page_num']}** "
+                    f"*(puntuación: {r['score']:.3f})*\n\n{r['chunk_text']}"
+                )
                 st.divider()
 
 
