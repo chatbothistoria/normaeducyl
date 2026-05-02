@@ -4,8 +4,14 @@ import json
 import numpy as np
 import os
 import csv
+import io
+import re
+from xml.sax.saxutils import escape
 from sentence_transformers import SentenceTransformer
 from groq import Groq
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 # ==============================================================
 # 1. CONFIGURACIÓN DE PÁGINA Y PARÁMETROS GLOBALES
@@ -73,7 +79,6 @@ def load_urls():
                             diccionario[pdf_name] = url
         except Exception as e:
             st.warning(f"⚠️ Error interno leyendo enlaces.csv: {e}")
-            
     return diccionario
 
 embed_model = load_embedding_model()
@@ -81,30 +86,47 @@ client = load_groq_client()
 diccionario_enlaces = load_urls()
 
 # ==============================================================
-# 3. FUNCIONES AUXILIARES PARA DESCARGAS (🌟 NUEVO)
+# 3. MOTOR DE GENERACIÓN DE PDF (🌟 NUEVO)
 # ==============================================================
-def generar_texto_historial():
-    """Genera un string con todo el historial de la conversación"""
-    texto = "HISTORIAL DE CONSULTAS - NORMATIVA EDUCATIVA CYL\n"
-    texto += "="*50 + "\n\n"
+def generar_pdf(mensajes, titulo="Documento Normativo"):
+    """Genera un archivo PDF a partir de una lista de mensajes"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    estilo_normal = styles["Normal"]
+    estilo_titulo = styles["Title"]
     
-    for msg in st.session_state.messages:
-        rol = "USUARIO" if msg["role"] == "user" else "ASISTENTE"
-        texto += f"[{rol}]:\n{msg['content']}\n"
-        texto += "-"*30 + "\n\n"
-    return texto
-
-def generar_texto_ultima_consulta(pregunta, respuesta):
-    """Genera un string solo con la última pregunta y respuesta"""
-    texto = "CONSULTA NORMATIVA EDUCATIVA CYL\n"
-    texto += "="*50 + "\n\n"
-    texto += f"[USUARIO]:\n{pregunta}\n\n"
-    texto += "-"*30 + "\n\n"
-    texto += f"[ASISTENTE]:\n{respuesta}\n\n"
-    return texto
+    flowables = [Paragraph(titulo, estilo_titulo), Spacer(1, 20)]
+    
+    for msg in mensajes:
+        # Filtramos los mensajes de sistema
+        if msg["role"] == "system":
+            continue
+            
+        rol = "USUARIO" if msg["role"] == "user" else "ASISTENTE NORMATIVO"
+        
+        # 1. Escapamos caracteres especiales que rompan el PDF (<, >, &)
+        texto = escape(msg["content"])
+        # 2. Eliminamos emojis (las fuentes estándar de PDF no los soportan y crashean)
+        texto = texto.encode('windows-1252', 'ignore').decode('windows-1252')
+        # 3. Convertimos formato de texto a etiquetas HTML para el PDF
+        texto = texto.replace('\n', '<br/>')
+        texto = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', texto) # Negritas
+        texto = re.sub(r'\*(.*?)\*', r'<i>\1</i>', texto)     # Cursivas
+        
+        # Añadimos los bloques al documento
+        flowables.append(Paragraph(f"<b>[{rol}]</b>", estilo_normal))
+        flowables.append(Spacer(1, 5))
+        flowables.append(Paragraph(texto, estilo_normal))
+        flowables.append(Spacer(1, 15))
+        
+    doc.build(flowables)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
 # ==============================================================
-# 4. INTERFAZ DE USUARIO (UI) Y MENÚ LATERAL
+# 4. INTERFAZ DE USUARIO (UI)
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
@@ -118,19 +140,19 @@ with st.sidebar:
     
     st.divider()
     
-    # 🌟 NUEVO: Botón para descargar todo el historial en el menú lateral
-    st.header("💾 Exportar")
+    # 🌟 NUEVO: Botón de PDF en el menú lateral
+    st.header("💾 Exportar a PDF")
     if "messages" in st.session_state and len(st.session_state.messages) > 1:
-        texto_historial = generar_texto_historial()
+        pdf_historial = generar_pdf(st.session_state.messages, "Historial de Consultas Normativas")
         st.download_button(
-            label="📄 Descargar Todo el Historial",
-            data=texto_historial,
-            file_name="historial_normativa.txt",
-            mime="text/plain",
+            label="📄 Descargar Historial (PDF)",
+            data=pdf_historial,
+            file_name="historial_normativa.pdf",
+            mime="application/pdf",
             use_container_width=True
         )
     else:
-        st.button("📄 Descargar Todo el Historial", disabled=True, use_container_width=True, help="Haz una consulta primero para poder descargar el historial.")
+        st.button("📄 Descargar Historial (PDF)", disabled=True, use_container_width=True, help="Haz una consulta primero.")
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
 
@@ -152,26 +174,25 @@ if st.session_state.current_etapa != etapa_seleccionada:
     st.session_state.messages = [{"role": "assistant", "content": f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?"}]
     st.session_state.current_etapa = etapa_seleccionada
 
-# Mostrar historial. Si es el asistente, comprobamos si no es el mensaje de saludo para añadirle un botón de descarga individual.
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        # 🌟 NUEVO: Añadimos un botón discreto de descarga debajo de cada respuesta del asistente
-        if msg["role"] == "assistant" and i > 0: # i > 0 evita poner botón en el saludo inicial
-            # Buscamos la pregunta inmediatamente anterior para adjuntarla
-            pregunta_anterior = st.session_state.messages[i-1]["content"] if i > 0 and st.session_state.messages[i-1]["role"] == "user" else "Pregunta desconocida"
-            texto_descarga = generar_texto_ultima_consulta(pregunta_anterior, msg["content"])
+        # 🌟 NUEVO: Botón PDF debajo de cada respuesta del asistente
+        if msg["role"] == "assistant" and i > 0: 
+            msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
             
-            # Usamos un expander o columnas para que el botón no sea muy intrusivo
+            mensajes_pdf = [msg_usuario, msg]
+            pdf_individual = generar_pdf(mensajes_pdf, "Consulta Normativa")
+            
             col1, col2 = st.columns([8, 2])
             with col2:
                 st.download_button(
-                    label="📥 Guardar",
-                    data=texto_descarga,
-                    file_name=f"consulta_normativa_{i}.txt",
-                    mime="text/plain",
-                    key=f"download_{i}" # Necesita una key única para que Streamlit no se queje
+                    label="📥 Guardar PDF",
+                    data=pdf_individual,
+                    file_name=f"consulta_normativa_{i}.pdf",
+                    mime="application/pdf",
+                    key=f"download_{i}" 
                 )
 
 # ==============================================================
@@ -263,5 +284,4 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
 
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
         
-        # 🌟 NUEVO: Hacemos un rerun para que el botón de descarga individual aparezca debajo de la respuesta recién generada
         st.rerun()
