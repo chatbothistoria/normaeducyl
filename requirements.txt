@@ -3,3 +3,4 @@ sentence-transformers
 faiss-cpu
 numpy
 groq
+reportlab
