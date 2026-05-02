@@ -58,23 +58,17 @@ def load_faiss_and_meta(etapa):
         metadata = json.load(f)
     return index, metadata
 
-# 🌟 DICCIONARIO DE ENLACES OFICIALES (Versión Limpia y a prueba de Excel)
 @st.cache_data
 def load_urls():
     diccionario = {}
     if os.path.exists("enlaces.csv"):
         try:
-            # utf-8-sig ignora los caracteres invisibles (BOM) que Excel añade a veces
             with open("enlaces.csv", "r", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
-                
-                # Comprobamos que existan las cabeceras
                 if "nombre_archivo" in reader.fieldnames and "url_oficial_verificada" in reader.fieldnames:
                     for row in reader:
                         pdf_name = row["nombre_archivo"].strip()
                         url = row.get("url_oficial_verificada", "").strip()
-                        
-                        # Si la URL existe y no es 'NaN', la guardamos
                         if url and url.lower() != "nan":
                             diccionario[pdf_name] = url
         except Exception as e:
@@ -87,7 +81,30 @@ client = load_groq_client()
 diccionario_enlaces = load_urls()
 
 # ==============================================================
-# 3. INTERFAZ DE USUARIO (UI)
+# 3. FUNCIONES AUXILIARES PARA DESCARGAS (🌟 NUEVO)
+# ==============================================================
+def generar_texto_historial():
+    """Genera un string con todo el historial de la conversación"""
+    texto = "HISTORIAL DE CONSULTAS - NORMATIVA EDUCATIVA CYL\n"
+    texto += "="*50 + "\n\n"
+    
+    for msg in st.session_state.messages:
+        rol = "USUARIO" if msg["role"] == "user" else "ASISTENTE"
+        texto += f"[{rol}]:\n{msg['content']}\n"
+        texto += "-"*30 + "\n\n"
+    return texto
+
+def generar_texto_ultima_consulta(pregunta, respuesta):
+    """Genera un string solo con la última pregunta y respuesta"""
+    texto = "CONSULTA NORMATIVA EDUCATIVA CYL\n"
+    texto += "="*50 + "\n\n"
+    texto += f"[USUARIO]:\n{pregunta}\n\n"
+    texto += "-"*30 + "\n\n"
+    texto += f"[ASISTENTE]:\n{respuesta}\n\n"
+    return texto
+
+# ==============================================================
+# 4. INTERFAZ DE USUARIO (UI) Y MENÚ LATERAL
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
@@ -98,6 +115,22 @@ with st.sidebar:
         ["Primaria", "Secundaria", "FP"]
     )
     st.info("💡 Consejo: Selecciona la etapa correspondiente a tu pregunta para que la IA busque en las leyes correctas.")
+    
+    st.divider()
+    
+    # 🌟 NUEVO: Botón para descargar todo el historial en el menú lateral
+    st.header("💾 Exportar")
+    if "messages" in st.session_state and len(st.session_state.messages) > 1:
+        texto_historial = generar_texto_historial()
+        st.download_button(
+            label="📄 Descargar Todo el Historial",
+            data=texto_historial,
+            file_name="historial_normativa.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        st.button("📄 Descargar Todo el Historial", disabled=True, use_container_width=True, help="Haz una consulta primero para poder descargar el historial.")
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
 
@@ -106,7 +139,7 @@ if index is None or metadata is None:
     st.stop()
 
 # ==============================================================
-# 4. GESTIÓN DE LA MEMORIA
+# 5. GESTIÓN DE LA MEMORIA
 # ==============================================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -119,12 +152,30 @@ if st.session_state.current_etapa != etapa_seleccionada:
     st.session_state.messages = [{"role": "assistant", "content": f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?"}]
     st.session_state.current_etapa = etapa_seleccionada
 
-for msg in st.session_state.messages:
+# Mostrar historial. Si es el asistente, comprobamos si no es el mensaje de saludo para añadirle un botón de descarga individual.
+for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        
+        # 🌟 NUEVO: Añadimos un botón discreto de descarga debajo de cada respuesta del asistente
+        if msg["role"] == "assistant" and i > 0: # i > 0 evita poner botón en el saludo inicial
+            # Buscamos la pregunta inmediatamente anterior para adjuntarla
+            pregunta_anterior = st.session_state.messages[i-1]["content"] if i > 0 and st.session_state.messages[i-1]["role"] == "user" else "Pregunta desconocida"
+            texto_descarga = generar_texto_ultima_consulta(pregunta_anterior, msg["content"])
+            
+            # Usamos un expander o columnas para que el botón no sea muy intrusivo
+            col1, col2 = st.columns([8, 2])
+            with col2:
+                st.download_button(
+                    label="📥 Guardar",
+                    data=texto_descarga,
+                    file_name=f"consulta_normativa_{i}.txt",
+                    mime="text/plain",
+                    key=f"download_{i}" # Necesita una key única para que Streamlit no se queje
+                )
 
 # ==============================================================
-# 5. LÓGICA DEL RAG (BÚSQUEDA Y CITAS)
+# 6. LÓGICA DEL RAG (BÚSQUEDA Y CITAS)
 # ==============================================================
 def buscar_contexto(pregunta):
     vector = embed_model.encode([pregunta], convert_to_numpy=True).astype('float32')
@@ -144,7 +195,6 @@ def buscar_contexto(pregunta):
 
         nombre_real = doc_name.replace(".pdf", "").replace("_", " ")
 
-        # 🌟 NUEVO COMPORTAMIENTO: Si hay enlace, es azul/clicable. Si no, texto plano.
         url_oficial = diccionario_enlaces.get(doc_name)
         if url_oficial:
             cita_formateada = f"- [{nombre_real}]({url_oficial}) (Pág. {page})"
@@ -163,7 +213,7 @@ def buscar_contexto(pregunta):
     return "\n".join(contexto_textos), list(documentos_citados)
 
 # ==============================================================
-# 6. INTERACCIÓN DEL USUARIO
+# 7. INTERACCIÓN DEL USUARIO
 # ==============================================================
 if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
     
@@ -212,3 +262,6 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             respuesta_placeholder.markdown(respuesta_completa)
 
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
+        
+        # 🌟 NUEVO: Hacemos un rerun para que el botón de descarga individual aparezca debajo de la respuesta recién generada
+        st.rerun()
