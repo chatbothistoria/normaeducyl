@@ -49,11 +49,11 @@ def load_groq_client():
 
 @st.cache_resource
 def load_faiss_and_meta(etapa):
-    # 🌟 CAMBIO 1: Actualizamos la clave en el diccionario
+    # 🌟 CAMBIO: Nombres oficiales actualizados mapeados a sus archivos correspondientes
     archivos = {
         "Infantil y Primaria": ("faiss_primaria.bin", "meta_primaria.json"),
-        "Secundaria": ("faiss_secundaria.bin", "meta_secundaria.json"),
-        "FP": ("faiss_fp.bin", "meta_fp.json")
+        "ESO y Bachillerato": ("faiss_secundaria.bin", "meta_secundaria.json"),
+        "Formación Profesional": ("faiss_fp.bin", "meta_fp.json")
     }
     bin_file, json_file = archivos.get(etapa, (None, None))
 
@@ -126,17 +126,17 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# 🌟 CAMBIO 2: Actualizamos la opción en el selector visual
+# 🌟 CAMBIO: Nombres actualizados en el selector
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
-    ["Infantil y Primaria", "Secundaria", "FP"]
+    ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
 
 if index is None or metadata is None:
-    st.error(f"⚠️ Faltan los archivos de la etapa {etapa_seleccionada}. Revisa que los archivos .bin y .json estén en GitHub.")
+    st.error(f"⚠️ Faltan los archivos de la etapa seleccionada. Revisa que los archivos .bin y .json estén en GitHub.")
     st.stop()
 
 # ==============================================================
