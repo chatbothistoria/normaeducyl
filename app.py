@@ -22,7 +22,6 @@ FETCH_CHUNKS = 30
 MAX_CHUNKS_TO_LLM = 8       
 MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2" 
 
-# 🌟 ARREGLO 1: Cambiamos la regla 3 para prohibirle a la IA generar bibliografía
 SYSTEM_PROMPT = """Eres un experto legal en normativa educativa de Castilla y León.
 Tu objetivo es responder a las dudas de los usuarios basándote ÚNICAMENTE en el contexto proporcionado.
 
@@ -50,8 +49,9 @@ def load_groq_client():
 
 @st.cache_resource
 def load_faiss_and_meta(etapa):
+    # 🌟 CAMBIO 1: Actualizamos la clave en el diccionario
     archivos = {
-        "Primaria": ("faiss_primaria.bin", "meta_primaria.json"),
+        "Infantil y Primaria": ("faiss_primaria.bin", "meta_primaria.json"),
         "Secundaria": ("faiss_secundaria.bin", "meta_secundaria.json"),
         "FP": ("faiss_fp.bin", "meta_fp.json")
     }
@@ -126,9 +126,10 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
+# 🌟 CAMBIO 2: Actualizamos la opción en el selector visual
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
-    ["Primaria", "Secundaria", "FP"]
+    ["Infantil y Primaria", "Secundaria", "FP"]
 )
 st.divider()
 
@@ -240,11 +241,9 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             {"role": "system", "content": SYSTEM_PROMPT.format(context=contexto_str)}
         ]
 
-        # 🌟 ARREGLO 2: Limpiamos la memoria para que la IA no vea nuestro "pie de fuentes"
         for m in st.session_state.messages[-3:-1]:
             contenido = m["content"]
             if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
-                # Cortamos el mensaje justo antes de que empiecen las fuentes automáticas
                 contenido = contenido.split("\n\n---")[0].strip()
                 
             mensajes_api.append({"role": m["role"], "content": contenido})
