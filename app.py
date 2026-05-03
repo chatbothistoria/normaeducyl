@@ -86,7 +86,7 @@ client = load_groq_client()
 diccionario_enlaces = load_urls()
 
 # ==============================================================
-# 3. MOTOR DE GENERACIÓN DE PDF (🌟 NUEVO)
+# 3. MOTOR DE GENERACIÓN DE PDF
 # ==============================================================
 def generar_pdf(mensajes, titulo="Documento Normativo"):
     """Genera un archivo PDF a partir de una lista de mensajes"""
@@ -99,22 +99,17 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
     flowables = [Paragraph(titulo, estilo_titulo), Spacer(1, 20)]
     
     for msg in mensajes:
-        # Filtramos los mensajes de sistema
         if msg["role"] == "system":
             continue
             
         rol = "USUARIO" if msg["role"] == "user" else "ASISTENTE NORMATIVO"
         
-        # 1. Escapamos caracteres especiales que rompan el PDF (<, >, &)
         texto = escape(msg["content"])
-        # 2. Eliminamos emojis (las fuentes estándar de PDF no los soportan y crashean)
         texto = texto.encode('windows-1252', 'ignore').decode('windows-1252')
-        # 3. Convertimos formato de texto a etiquetas HTML para el PDF
         texto = texto.replace('\n', '<br/>')
-        texto = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', texto) # Negritas
-        texto = re.sub(r'\*(.*?)\*', r'<i>\1</i>', texto)     # Cursivas
+        texto = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', texto) 
+        texto = re.sub(r'\*(.*?)\*', r'<i>\1</i>', texto)     
         
-        # Añadimos los bloques al documento
         flowables.append(Paragraph(f"<b>[{rol}]</b>", estilo_normal))
         flowables.append(Spacer(1, 5))
         flowables.append(Paragraph(texto, estilo_normal))
@@ -130,29 +125,13 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    etapa_seleccionada = st.selectbox(
-        "Selecciona la Etapa Educativa:",
-        ["Primaria", "Secundaria", "FP"]
-    )
-    st.info("💡 Consejo: Selecciona la etapa correspondiente a tu pregunta para que la IA busque en las leyes correctas.")
-    
-    st.divider()
-    
-    # 🌟 NUEVO: Botón de PDF en el menú lateral
-    st.header("💾 Exportar a PDF")
-    if "messages" in st.session_state and len(st.session_state.messages) > 1:
-        pdf_historial = generar_pdf(st.session_state.messages, "Historial de Consultas Normativas")
-        st.download_button(
-            label="📄 Descargar Historial (PDF)",
-            data=pdf_historial,
-            file_name="historial_normativa.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-    else:
-        st.button("📄 Descargar Historial (PDF)", disabled=True, use_container_width=True, help="Haz una consulta primero.")
+# 🌟 CAMBIO: Selector debajo del título y fuera del menú lateral
+etapa_seleccionada = st.selectbox(
+    "Selecciona la Etapa Educativa:",
+    ["Primaria", "Secundaria", "FP"]
+)
+st.info("💡 Consejo: Selecciona la etapa correspondiente a tu pregunta para que la IA busque en las leyes correctas.")
+st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
 
@@ -161,7 +140,7 @@ if index is None or metadata is None:
     st.stop()
 
 # ==============================================================
-# 5. GESTIÓN DE LA MEMORIA
+# 5. GESTIÓN DE LA MEMORIA Y CHAT
 # ==============================================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -174,25 +153,41 @@ if st.session_state.current_etapa != etapa_seleccionada:
     st.session_state.messages = [{"role": "assistant", "content": f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?"}]
     st.session_state.current_etapa = etapa_seleccionada
 
+# Mostrar historial de mensajes
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        # 🌟 NUEVO: Botón PDF debajo de cada respuesta del asistente
+        # 🌟 CAMBIO: Los dos botones juntos debajo de cada respuesta de la IA
         if msg["role"] == "assistant" and i > 0: 
+            # Preparamos los datos para los PDFs
             msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
             
-            mensajes_pdf = [msg_usuario, msg]
-            pdf_individual = generar_pdf(mensajes_pdf, "Consulta Normativa")
+            mensajes_pdf_individual = [msg_usuario, msg]
+            pdf_individual = generar_pdf(mensajes_pdf_individual, "Consulta Normativa")
+            pdf_historial = generar_pdf(st.session_state.messages, "Historial de Consultas Normativas")
             
-            col1, col2 = st.columns([8, 2])
-            with col2:
+            # Usamos columnas para empujar los botones a la derecha y ponerlos juntos
+            col_espacio, col_btn_resp, col_btn_conv = st.columns([4, 3, 3])
+            
+            with col_btn_resp:
                 st.download_button(
-                    label="📥 Guardar PDF",
+                    label="📥 Guardar respuesta",
                     data=pdf_individual,
                     file_name=f"consulta_normativa_{i}.pdf",
                     mime="application/pdf",
-                    key=f"download_{i}" 
+                    key=f"dl_resp_{i}",
+                    use_container_width=True
+                )
+                
+            with col_btn_conv:
+                st.download_button(
+                    label="📄 Guardar conversación",
+                    data=pdf_historial,
+                    file_name="historial_normativa.pdf",
+                    mime="application/pdf",
+                    key=f"dl_conv_{i}",
+                    use_container_width=True
                 )
 
 # ==============================================================
