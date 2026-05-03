@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import faiss
 import json
 import numpy as np
@@ -131,8 +130,6 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-st.markdown("<p style='text-align: center; font-size: 16px; color: #888;'>⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</p>", unsafe_allow_html=True)
-
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
@@ -142,17 +139,29 @@ if index is None or metadata is None:
     st.stop()
 
 # ==============================================================
-# 5. GESTIÓN DE LA MEMORIA Y CHAT
+# 5. GESTIÓN DE LA MEMORIA Y CHAT (CON DISCLAIMER INTEGRADO)
 # ==============================================================
+
+# 🌟 NUEVO: El texto de bienvenida ahora incluye el disclaimer de forma integrada
 if "messages" not in st.session_state:
+    mensaje_bienvenida = (
+        f"¡Hola! Soy tu asistente de normativa. He cargado las leyes de **{etapa_seleccionada}**. ¿En qué puedo ayudarte?\n\n"
+        f"---\n"
+        f"*⚠️ **Nota**: Este asistente utiliza Inteligencia Artificial y puede cometer errores. Contrasta siempre la información con los documentos oficiales (BOCyL/BOE).*"
+    )
     st.session_state.messages = []
-    st.session_state.messages.append({"role": "assistant", "content": f"¡Hola! Soy tu asistente de normativa. He cargado las leyes de **{etapa_seleccionada}**. ¿En qué puedo ayudarte?"})
+    st.session_state.messages.append({"role": "assistant", "content": mensaje_bienvenida})
 
 if "current_etapa" not in st.session_state:
     st.session_state.current_etapa = etapa_seleccionada
 
 if st.session_state.current_etapa != etapa_seleccionada:
-    st.session_state.messages = [{"role": "assistant", "content": f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?"}]
+    mensaje_cambio = (
+        f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?\n\n"
+        f"---\n"
+        f"*⚠️ **Nota**: Este asistente utiliza Inteligencia Artificial y puede cometer errores. Contrasta siempre la información con los documentos oficiales (BOCyL/BOE).*"
+    )
+    st.session_state.messages = [{"role": "assistant", "content": mensaje_cambio}]
     st.session_state.current_etapa = etapa_seleccionada
 
 for i, msg in enumerate(st.session_state.messages):
@@ -246,8 +255,12 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         historial_previo = st.session_state.messages[:-1][-4:] 
         for m in historial_previo:
             contenido = m["content"]
-            if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
-                contenido = contenido.split("\n\n---")[0].strip()
+            # Limpiamos tanto las fuentes consultadas como el disclaimer si aparece en la memoria
+            if m["role"] == "assistant":
+                if "**📚 Fuentes consultadas:**" in contenido:
+                    contenido = contenido.split("\n\n---")[0].strip()
+                if "*⚠️ **Nota**: Este asistente" in contenido:
+                    contenido = contenido.split("\n\n---")[0].strip()
                 
             mensajes_api.append({"role": m["role"], "content": contenido})
 
@@ -283,43 +296,3 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
         
         st.rerun()
-
-# ==============================================================
-# 8. BLOQUEO AGRESIVO DE AUTOFOCUS (FIX DEFINITIVO)
-# ==============================================================
-if "scroll_inicial" not in st.session_state:
-    components.html(
-        """
-        <script>
-            const doc = window.parent.document;
-            let counter = 0;
-            
-            // Función que quita el foco a la caja de chat y sube la pantalla
-            function preventStreamlitAutofocus() {
-                // 1. Quitar el foco de cualquier elemento activo (como el input de chat)
-                if (doc.activeElement) {
-                    doc.activeElement.blur();
-                }
-                
-                // 2. Subir la ventana principal
-                window.parent.scrollTo(0, 0);
-                
-                // 3. Subir los contenedores internos de Streamlit
-                const containers = doc.querySelectorAll('.main, [data-testid="stAppViewContainer"]');
-                containers.forEach(c => c.scrollTo(0, 0));
-            }
-
-            // Ejecutar la función cada 50 milisegundos para ganar la batalla a Streamlit
-            const intervalId = setInterval(() => {
-                preventStreamlitAutofocus();
-                counter++;
-                // Detenerse después de 1.5 segundos (30 iteraciones)
-                if (counter >= 30) {
-                    clearInterval(intervalId);
-                }
-            }, 50);
-        </script>
-        """,
-        height=0, width=0
-    )
-    st.session_state.scroll_inicial = True
