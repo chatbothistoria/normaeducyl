@@ -49,7 +49,6 @@ def load_groq_client():
 
 @st.cache_resource
 def load_faiss_and_meta(etapa):
-    # 🌟 CAMBIO: Nombres oficiales actualizados mapeados a sus archivos correspondientes
     archivos = {
         "Infantil y Primaria": ("faiss_primaria.bin", "meta_primaria.json"),
         "ESO y Bachillerato": ("faiss_secundaria.bin", "meta_secundaria.json"),
@@ -126,11 +125,14 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# 🌟 CAMBIO: Nombres actualizados en el selector
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
+
+# 🌟 NUEVO: Disclaimer añadido
+st.warning("⚠️ **Nota importante:** Este asistente utiliza Inteligencia Artificial para buscar y resumir la normativa educativa de Castilla y León. Aunque está diseñado para ser riguroso, la IA puede cometer errores, omitir matices o no reflejar la interpretación jurídica exacta. Utiliza esta herramienta como una guía de apoyo y contrasta siempre la información final con los documentos oficiales.")
+
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
@@ -229,6 +231,7 @@ def buscar_contexto(pregunta):
 # ==============================================================
 if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
     
+    # Añadimos la pregunta del usuario a la memoria visual
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -241,13 +244,17 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             {"role": "system", "content": SYSTEM_PROMPT.format(context=contexto_str)}
         ]
 
-        for m in st.session_state.messages[-3:-1]:
+        # 🌟 ARREGLO: Limpiamos las fuentes del historial enviado a la IA (los últimos 4 mensajes)
+        # Esto asegura que la IA nunca lea las fuentes automáticas y no intente imitarlas.
+        historial_previo = st.session_state.messages[:-1][-4:] 
+        for m in historial_previo:
             contenido = m["content"]
             if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
                 contenido = contenido.split("\n\n---")[0].strip()
                 
             mensajes_api.append({"role": m["role"], "content": contenido})
 
+        # Añadimos la nueva pregunta del usuario
         mensajes_api.append({"role": "user", "content": prompt})
 
         respuesta_placeholder = st.empty()
@@ -266,7 +273,8 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
                     respuesta_completa += chunk.choices[0].delta.content
                     respuesta_placeholder.markdown(respuesta_completa + "▌")
 
-            if citas and "no encuentro" not in respuesta_completa.lower() and "lo siento" not in respuesta_completa.lower():
+            # 🌟 ARREGLO: Solo se ocultan las citas si dice la frase EXACTA de error.
+            if citas and "no encuentro esa información exacta" not in respuesta_completa.lower():
                 citas_mostrar = citas[:4] 
                 pie_fuentes = "\n\n---\n**📚 Fuentes consultadas:**\n" + "\n".join(citas_mostrar)
                 respuesta_completa += pie_fuentes
@@ -277,6 +285,7 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             respuesta_completa = f"⚠️ Ocurrió un error al contactar con la IA: {e}"
             respuesta_placeholder.markdown(respuesta_completa)
 
+        # Guardamos la respuesta final en la memoria visual
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
         
         st.rerun()
