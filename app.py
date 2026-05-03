@@ -125,12 +125,11 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# 🌟 CAMBIO: Selector debajo del título y fuera del menú lateral
+# Selector debajo del título (Sin el recuadro de consejo)
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
     ["Primaria", "Secundaria", "FP"]
 )
-st.info("💡 Consejo: Selecciona la etapa correspondiente a tu pregunta para que la IA busque en las leyes correctas.")
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
@@ -158,7 +157,7 @@ for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        # 🌟 CAMBIO: Los dos botones juntos debajo de cada respuesta de la IA
+        # Los dos botones juntos debajo de cada respuesta de la IA
         if msg["role"] == "assistant" and i > 0: 
             # Preparamos los datos para los PDFs
             msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
