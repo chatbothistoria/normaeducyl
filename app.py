@@ -1,5 +1,5 @@
 import streamlit as st
-import streamlit.components.v1 as components  # 🌟 NUEVO IMPORT NECESARIO
+import streamlit.components.v1 as components
 import faiss
 import json
 import numpy as np
@@ -131,7 +131,6 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-# Aviso legal con letra a 16px
 st.markdown("<p style='text-align: center; font-size: 16px; color: #888;'>⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</p>", unsafe_allow_html=True)
 
 st.divider()
@@ -286,19 +285,25 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         st.rerun()
 
 # ==============================================================
-# 8. FORZAR SCROLL AL INICIO (FIX PARA EL TÍTULO CORTADO)
+# 8. FORZAR SCROLL AL INICIO (FIX DEFINITIVO PARA EL TÍTULO)
 # ==============================================================
 if "scroll_inicial" not in st.session_state:
     components.html(
         """
         <script>
-            // Espera medio segundo a que Streamlit baje, y vuelve a subir suavemente
-            setTimeout(function() {
-                const mainContainer = window.parent.document.querySelector('.main');
-                if (mainContainer) {
-                    mainContainer.scrollTo({ top: 0, behavior: 'smooth' });
-                }
-            }, 500);
+            function irArriba() {
+                // Forzamos el scroll global
+                window.parent.scrollTo(0, 0);
+                
+                // Forzamos el scroll en todos los posibles contenedores internos de Streamlit
+                const contenedores = window.parent.document.querySelectorAll('.main, [data-testid="stAppViewContainer"], [data-testid="stAppViewBlockContainer"]');
+                contenedores.forEach(c => c.scrollTo({ top: 0, behavior: 'smooth' }));
+            }
+            
+            // Lo ejecutamos en cascada para ganarle la batalla al autofocus de Streamlit
+            setTimeout(irArriba, 100);
+            setTimeout(irArriba, 500);
+            setTimeout(irArriba, 1000);
         </script>
         """,
         height=0, width=0
