@@ -125,12 +125,12 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# 🌟 TRUCO CSS ACTUALIZADO: Letra más grande y legible
+# 🌟 TRUCO CSS ACTUALIZADO: Letra a 16px para máxima legibilidad
 st.markdown("""
     <style>
-    /* Añadimos más margen inferior para que el texto grande no pise la barra */
+    /* Añadimos un poco más de margen inferior para compensar la letra más grande */
     .stApp {
-        padding-bottom: 45px !important;
+        padding-bottom: 50px !important;
     }
     /* Creamos el aviso legal fijo abajo del todo */
     .disclaimer-flotante {
@@ -139,8 +139,8 @@ st.markdown("""
         left: 0;
         width: 100%;
         text-align: center;
-        font-size: 14px; /* Letra aumentada para que se pueda leer bien */
-        color: #666666; /* Gris un poco más oscuro para mejor contraste */
+        font-size: 16px; /* Letra a 16px como pediste */
+        color: #666666; /* Gris para mantener un buen contraste sin ser agresivo */
         background-color: transparent;
         z-index: 999999;
         pointer-events: none; /* Evita que el texto bloquee clics accidentales */
