@@ -22,13 +22,14 @@ FETCH_CHUNKS = 30
 MAX_CHUNKS_TO_LLM = 8       
 MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2" 
 
+# 🌟 ARREGLO 1: Cambiamos la regla 3 para prohibirle a la IA generar bibliografía
 SYSTEM_PROMPT = """Eres un experto legal en normativa educativa de Castilla y León.
 Tu objetivo es responder a las dudas de los usuarios basándote ÚNICAMENTE en el contexto proporcionado.
 
 REGLAS:
 1. Lee detenidamente el contexto proporcionado. A veces la información está dividida en varios fragmentos.
 2. Si el contexto contiene la respuesta (aunque sea de forma parcial o con sinónimos), redacta una respuesta clara, profesional y empática.
-3. Cita SIEMPRE el documento y la página de donde sacas la información al final de tu explicación.
+3. Cita los documentos en el texto de tu respuesta, pero NUNCA generes un apartado final de "Fuentes consultadas", bibliografía o referencias (el sistema lo añadirá automáticamente).
 4. Si la información no está en el contexto, di educadamente: "Lo siento, pero no encuentro esa información exacta en la normativa que tengo cargada."
 5. NUNCA te inventes leyes, fechas o datos.
 
@@ -125,7 +126,6 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# Selector debajo del título (Sin el recuadro de consejo)
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
     ["Primaria", "Secundaria", "FP"]
@@ -152,21 +152,17 @@ if st.session_state.current_etapa != etapa_seleccionada:
     st.session_state.messages = [{"role": "assistant", "content": f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?"}]
     st.session_state.current_etapa = etapa_seleccionada
 
-# Mostrar historial de mensajes
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        # Los dos botones juntos debajo de cada respuesta de la IA
         if msg["role"] == "assistant" and i > 0: 
-            # Preparamos los datos para los PDFs
             msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
             
             mensajes_pdf_individual = [msg_usuario, msg]
             pdf_individual = generar_pdf(mensajes_pdf_individual, "Consulta Normativa")
             pdf_historial = generar_pdf(st.session_state.messages, "Historial de Consultas Normativas")
             
-            # Usamos columnas para empujar los botones a la derecha y ponerlos juntos
             col_espacio, col_btn_resp, col_btn_conv = st.columns([4, 3, 3])
             
             with col_btn_resp:
@@ -244,8 +240,14 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             {"role": "system", "content": SYSTEM_PROMPT.format(context=contexto_str)}
         ]
 
+        # 🌟 ARREGLO 2: Limpiamos la memoria para que la IA no vea nuestro "pie de fuentes"
         for m in st.session_state.messages[-3:-1]:
-            mensajes_api.append({"role": m["role"], "content": m["content"]})
+            contenido = m["content"]
+            if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
+                # Cortamos el mensaje justo antes de que empiecen las fuentes automáticas
+                contenido = contenido.split("\n\n---")[0].strip()
+                
+            mensajes_api.append({"role": m["role"], "content": contenido})
 
         mensajes_api.append({"role": "user", "content": prompt})
 
