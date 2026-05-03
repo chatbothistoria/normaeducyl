@@ -125,6 +125,32 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
+# 🌟 TRUCO CSS: Inyectamos el disclaimer anclado al fondo absoluto de la pantalla
+st.markdown("""
+    <style>
+    /* Añadimos un poco de margen inferior al contenedor principal para que la barra de chat suba un poco */
+    .stApp {
+        padding-bottom: 35px !important;
+    }
+    /* Creamos el aviso legal fijo abajo del todo */
+    .disclaimer-flotante {
+        position: fixed;
+        bottom: 5px;
+        left: 0;
+        width: 100%;
+        text-align: center;
+        font-size: 11px;
+        color: #888888;
+        background-color: transparent;
+        z-index: 999999;
+        pointer-events: none; /* Evita que el texto bloquee clics accidentales */
+    }
+    </style>
+    <div class="disclaimer-flotante">
+        ⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).
+    </div>
+""", unsafe_allow_html=True)
+
 etapa_seleccionada = st.selectbox(
     "Selecciona la Etapa Educativa:",
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
@@ -224,11 +250,8 @@ def buscar_contexto(pregunta):
     return "\n".join(contexto_textos), list(documentos_citados)
 
 # ==============================================================
-# 7. INTERACCIÓN DEL USUARIO Y DISCLAIMER
+# 7. INTERACCIÓN DEL USUARIO
 # ==============================================================
-
-# 🌟 NUEVO: El aviso legal en texto pequeño, justo encima de la barra de chat
-st.caption("⚠️ **Nota importante:** Este asistente utiliza Inteligencia Artificial para buscar y resumir la normativa educativa de Castilla y León. Aunque está diseñado para ser riguroso, la IA puede cometer errores, omitir matices o no reflejar la interpretación jurídica exacta. Utiliza esta herramienta como una guía de apoyo y contrasta siempre la información final con los documentos oficiales.")
 
 if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
     
