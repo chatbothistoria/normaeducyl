@@ -130,9 +130,6 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-# 🌟 NUEVO: Disclaimer añadido
-st.warning("⚠️ **Nota importante:** Este asistente utiliza Inteligencia Artificial para buscar y resumir la normativa educativa de Castilla y León. Aunque está diseñado para ser riguroso, la IA puede cometer errores, omitir matices o no reflejar la interpretación jurídica exacta. Utiliza esta herramienta como una guía de apoyo y contrasta siempre la información final con los documentos oficiales.")
-
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
@@ -227,11 +224,14 @@ def buscar_contexto(pregunta):
     return "\n".join(contexto_textos), list(documentos_citados)
 
 # ==============================================================
-# 7. INTERACCIÓN DEL USUARIO
+# 7. INTERACCIÓN DEL USUARIO Y DISCLAIMER
 # ==============================================================
+
+# 🌟 NUEVO: El aviso legal en texto pequeño, justo encima de la barra de chat
+st.caption("⚠️ **Nota importante:** Este asistente utiliza Inteligencia Artificial para buscar y resumir la normativa educativa de Castilla y León. Aunque está diseñado para ser riguroso, la IA puede cometer errores, omitir matices o no reflejar la interpretación jurídica exacta. Utiliza esta herramienta como una guía de apoyo y contrasta siempre la información final con los documentos oficiales.")
+
 if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
     
-    # Añadimos la pregunta del usuario a la memoria visual
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -244,8 +244,6 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             {"role": "system", "content": SYSTEM_PROMPT.format(context=contexto_str)}
         ]
 
-        # 🌟 ARREGLO: Limpiamos las fuentes del historial enviado a la IA (los últimos 4 mensajes)
-        # Esto asegura que la IA nunca lea las fuentes automáticas y no intente imitarlas.
         historial_previo = st.session_state.messages[:-1][-4:] 
         for m in historial_previo:
             contenido = m["content"]
@@ -254,7 +252,6 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
                 
             mensajes_api.append({"role": m["role"], "content": contenido})
 
-        # Añadimos la nueva pregunta del usuario
         mensajes_api.append({"role": "user", "content": prompt})
 
         respuesta_placeholder = st.empty()
@@ -273,7 +270,6 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
                     respuesta_completa += chunk.choices[0].delta.content
                     respuesta_placeholder.markdown(respuesta_completa + "▌")
 
-            # 🌟 ARREGLO: Solo se ocultan las citas si dice la frase EXACTA de error.
             if citas and "no encuentro esa información exacta" not in respuesta_completa.lower():
                 citas_mostrar = citas[:4] 
                 pie_fuentes = "\n\n---\n**📚 Fuentes consultadas:**\n" + "\n".join(citas_mostrar)
@@ -285,7 +281,6 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
             respuesta_completa = f"⚠️ Ocurrió un error al contactar con la IA: {e}"
             respuesta_placeholder.markdown(respuesta_completa)
 
-        # Guardamos la respuesta final en la memoria visual
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
         
         st.rerun()
