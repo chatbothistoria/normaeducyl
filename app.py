@@ -130,6 +130,9 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
+# Disclaimer estático debajo del selector
+st.markdown("<p style='text-align: center; font-size: 15px; color: #888;'>⚠️ <i>Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</i></p>", unsafe_allow_html=True)
+
 st.divider()
 
 index, metadata = load_faiss_and_meta(etapa_seleccionada)
@@ -139,36 +142,27 @@ if index is None or metadata is None:
     st.stop()
 
 # ==============================================================
-# 5. GESTIÓN DE LA MEMORIA Y CHAT (CON DISCLAIMER INTEGRADO)
+# 5. GESTIÓN DE LA MEMORIA Y CHAT (LIENZO EN BLANCO)
 # ==============================================================
 
-# 🌟 NUEVO: El texto de bienvenida ahora incluye el disclaimer de forma integrada
+# Empezamos con el chat totalmente en blanco
 if "messages" not in st.session_state:
-    mensaje_bienvenida = (
-        f"¡Hola! Soy tu asistente de normativa. He cargado las leyes de **{etapa_seleccionada}**. ¿En qué puedo ayudarte?\n\n"
-        f"---\n"
-        f"*⚠️ **Nota**: Este asistente utiliza Inteligencia Artificial y puede cometer errores. Contrasta siempre la información con los documentos oficiales (BOCyL/BOE).*"
-    )
     st.session_state.messages = []
-    st.session_state.messages.append({"role": "assistant", "content": mensaje_bienvenida})
 
 if "current_etapa" not in st.session_state:
     st.session_state.current_etapa = etapa_seleccionada
 
+# Si cambia la etapa educativa, simplemente limpiamos el chat para empezar de cero
 if st.session_state.current_etapa != etapa_seleccionada:
-    mensaje_cambio = (
-        f"He cambiado mi base de datos a **{etapa_seleccionada}**. ¿Qué necesitas saber?\n\n"
-        f"---\n"
-        f"*⚠️ **Nota**: Este asistente utiliza Inteligencia Artificial y puede cometer errores. Contrasta siempre la información con los documentos oficiales (BOCyL/BOE).*"
-    )
-    st.session_state.messages = [{"role": "assistant", "content": mensaje_cambio}]
+    st.session_state.messages = []
     st.session_state.current_etapa = etapa_seleccionada
 
 for i, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         
-        if msg["role"] == "assistant" and i > 0: 
+        # Opciones de descarga solo en los mensajes del asistente
+        if msg["role"] == "assistant": 
             msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
             
             mensajes_pdf_individual = [msg_usuario, msg]
@@ -255,12 +249,8 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         historial_previo = st.session_state.messages[:-1][-4:] 
         for m in historial_previo:
             contenido = m["content"]
-            # Limpiamos tanto las fuentes consultadas como el disclaimer si aparece en la memoria
-            if m["role"] == "assistant":
-                if "**📚 Fuentes consultadas:**" in contenido:
-                    contenido = contenido.split("\n\n---")[0].strip()
-                if "*⚠️ **Nota**: Este asistente" in contenido:
-                    contenido = contenido.split("\n\n---")[0].strip()
+            if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
+                contenido = contenido.split("\n\n---")[0].strip()
                 
             mensajes_api.append({"role": m["role"], "content": contenido})
 
