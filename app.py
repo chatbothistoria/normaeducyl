@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components  # 🌟 NUEVO IMPORT NECESARIO
 import faiss
 import json
 import numpy as np
@@ -130,7 +131,7 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-# 🌟 ARREGLO: Aviso legal con letra a 16px para máxima legibilidad en cualquier pantalla.
+# Aviso legal con letra a 16px
 st.markdown("<p style='text-align: center; font-size: 16px; color: #888;'>⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</p>", unsafe_allow_html=True)
 
 st.divider()
@@ -229,7 +230,6 @@ def buscar_contexto(pregunta):
 # ==============================================================
 # 7. INTERACCIÓN DEL USUARIO
 # ==============================================================
-
 if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -284,3 +284,23 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
         
         st.rerun()
+
+# ==============================================================
+# 8. FORZAR SCROLL AL INICIO (FIX PARA EL TÍTULO CORTADO)
+# ==============================================================
+if "scroll_inicial" not in st.session_state:
+    components.html(
+        """
+        <script>
+            // Espera medio segundo a que Streamlit baje, y vuelve a subir suavemente
+            setTimeout(function() {
+                const mainContainer = window.parent.document.querySelector('.main');
+                if (mainContainer) {
+                    mainContainer.scrollTo({ top: 0, behavior: 'smooth' });
+                }
+            }, 500);
+        </script>
+        """,
+        height=0, width=0
+    )
+    st.session_state.scroll_inicial = True
