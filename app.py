@@ -285,25 +285,39 @@ if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
         st.rerun()
 
 # ==============================================================
-# 8. FORZAR SCROLL AL INICIO (FIX DEFINITIVO PARA EL TÍTULO)
+# 8. BLOQUEO AGRESIVO DE AUTOFOCUS (FIX DEFINITIVO)
 # ==============================================================
 if "scroll_inicial" not in st.session_state:
     components.html(
         """
         <script>
-            function irArriba() {
-                // Forzamos el scroll global
+            const doc = window.parent.document;
+            let counter = 0;
+            
+            // Función que quita el foco a la caja de chat y sube la pantalla
+            function preventStreamlitAutofocus() {
+                // 1. Quitar el foco de cualquier elemento activo (como el input de chat)
+                if (doc.activeElement) {
+                    doc.activeElement.blur();
+                }
+                
+                // 2. Subir la ventana principal
                 window.parent.scrollTo(0, 0);
                 
-                // Forzamos el scroll en todos los posibles contenedores internos de Streamlit
-                const contenedores = window.parent.document.querySelectorAll('.main, [data-testid="stAppViewContainer"], [data-testid="stAppViewBlockContainer"]');
-                contenedores.forEach(c => c.scrollTo({ top: 0, behavior: 'smooth' }));
+                // 3. Subir los contenedores internos de Streamlit
+                const containers = doc.querySelectorAll('.main, [data-testid="stAppViewContainer"]');
+                containers.forEach(c => c.scrollTo(0, 0));
             }
-            
-            // Lo ejecutamos en cascada para ganarle la batalla al autofocus de Streamlit
-            setTimeout(irArriba, 100);
-            setTimeout(irArriba, 500);
-            setTimeout(irArriba, 1000);
+
+            // Ejecutar la función cada 50 milisegundos para ganar la batalla a Streamlit
+            const intervalId = setInterval(() => {
+                preventStreamlitAutofocus();
+                counter++;
+                // Detenerse después de 1.5 segundos (30 iteraciones)
+                if (counter >= 30) {
+                    clearInterval(intervalId);
+                }
+            }, 50);
         </script>
         """,
         height=0, width=0
