@@ -130,8 +130,8 @@ etapa_seleccionada = st.selectbox(
     ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-# 🌟 ARREGLO PARA MÓVILES: Aviso legal integrado en el flujo natural de la página, justo debajo del selector.
-st.markdown("<p style='text-align: center; font-size: 14px; color: #888;'>⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</p>", unsafe_allow_html=True)
+# 🌟 ARREGLO: Aviso legal con letra a 16px para máxima legibilidad en cualquier pantalla.
+st.markdown("<p style='text-align: center; font-size: 16px; color: #888;'>⚠️ Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</p>", unsafe_allow_html=True)
 
 st.divider()
 
