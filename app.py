@@ -125,22 +125,22 @@ def generar_pdf(mensajes, titulo="Documento Normativo"):
 # ==============================================================
 st.title("📚 Asistente de Normativa Educativa - CyL")
 
-# 🌟 TRUCO CSS: Inyectamos el disclaimer anclado al fondo absoluto de la pantalla
+# 🌟 TRUCO CSS ACTUALIZADO: Letra más grande y legible
 st.markdown("""
     <style>
-    /* Añadimos un poco de margen inferior al contenedor principal para que la barra de chat suba un poco */
+    /* Añadimos más margen inferior para que el texto grande no pise la barra */
     .stApp {
-        padding-bottom: 35px !important;
+        padding-bottom: 45px !important;
     }
     /* Creamos el aviso legal fijo abajo del todo */
     .disclaimer-flotante {
         position: fixed;
-        bottom: 5px;
+        bottom: 10px;
         left: 0;
         width: 100%;
         text-align: center;
-        font-size: 11px;
-        color: #888888;
+        font-size: 14px; /* Letra aumentada para que se pueda leer bien */
+        color: #666666; /* Gris un poco más oscuro para mejor contraste */
         background-color: transparent;
         z-index: 999999;
         pointer-events: none; /* Evita que el texto bloquee clics accidentales */
