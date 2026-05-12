@@ -1,364 +1,288 @@
 import streamlit as st
-from supabase import create_client
+import faiss
+import json
+import numpy as np
+import os
+import csv
+import io
+import re
+from xml.sax.saxutils import escape
 from sentence_transformers import SentenceTransformer
 from groq import Groq
-import csv
-import os
-from fpdf import FPDF
-import textwrap
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
-# =============================================================================
-# 1. CONFIGURACIÓN DE LA PÁGINA
-# =============================================================================
-st.set_page_config(page_title="Buscador de Normativa Educativa", page_icon="📚")
+# ==============================================================
+# 1. CONFIGURACIÓN DE PÁGINA Y PARÁMETROS GLOBALES
+# ==============================================================
+st.set_page_config(page_title="Asistente Normativa Educativa CyL", page_icon="📚", layout="centered")
 
-# =============================================================================
-# 2. SESSION STATE
-# =============================================================================
-for _key, _default in [
-    ("ultima_pregunta",   None),
-    ("ultima_respuesta",  None),
-    ("ultimas_fuentes",   []),
-    ("historial_completo", []),
-]:
-    if _key not in st.session_state:
-        st.session_state[_key] = _default
+FETCH_CHUNKS = 30           
+MAX_CHUNKS_TO_LLM = 8       
+MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2" 
 
-# =============================================================================
-# 3. PDF — FIX DE ENCODING
-#
-# Los caracteres españoles (á é í ó ú ñ ü Á É etc.) SÍ están en Latin-1
-# y FPDF los renderiza perfectamente. El problema eran los caracteres Unicode
-# que los LLMs insertan: comillas tipográficas, rayas, puntos suspensivos, etc.
-# Los sustituimos antes de codificar, así el PDF sale limpio.
-# =============================================================================
-_UNICODE_FIX = {
-    "\u2018": "'",   # '  comilla simple izquierda
-    "\u2019": "'",   # '  comilla simple derecha (la más frecuente en LLMs)
-    "\u201C": '"',   # "  comilla doble izquierda
-    "\u201D": '"',   # "  comilla doble derecha
-    "\u2013": "-",   # –  guion medio (en-dash)
-    "\u2014": "-",   # —  guion largo (em-dash)
-    "\u2022": "-",   # •  viñeta
-    "\u00B7": "-",   # ·  punto medio
-    "\u2026": "...", # …  puntos suspensivos
-    "\u00A0": " ",   # espacio no separable
-    "\u00AD": "-",   # guion suave
-}
+SYSTEM_PROMPT = """Eres un experto legal en normativa educativa de Castilla y León.
+Tu objetivo es responder a las dudas de los usuarios basándote ÚNICAMENTE en el contexto proporcionado.
 
-def _limpiar(texto: str) -> str:
-    """Preserva á/é/í/ó/ú/ñ y sustituye los chars Unicode que FPDF no soporta."""
-    for orig, repl in _UNICODE_FIX.items():
-        texto = texto.replace(orig, repl)
-    return texto.encode("latin-1", "replace").decode("latin-1")
+REGLAS:
+1. Lee detenidamente el contexto proporcionado. A veces la información está dividida en varios fragmentos.
+2. Si el contexto contiene la respuesta (aunque sea de forma parcial o con sinónimos), redacta una respuesta clara, profesional y empática.
+3. Cita los documentos en el texto de tu respuesta, pero NUNCA generes un apartado final de "Fuentes consultadas", bibliografía o referencias (el sistema lo añadirá automáticamente).
+4. Si la información no está en el contexto, di educadamente: "Lo siento, pero no encuentro esa información exacta en la normativa que tengo cargada."
+5. NUNCA te inventes leyes, fechas o datos.
 
-def generar_pdf(lista_interacciones, titulo_documento="Normativa Educativa"):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
+CONTEXTO DE BÚSQUEDA:
+{context}
+"""
 
-    pdf.set_font("Helvetica", style="B", size=16)
-    pdf.cell(0, 10, _limpiar(titulo_documento), ln=True, align="C")
-    pdf.ln(10)
-
-    for item in lista_interacciones:
-        # Pregunta
-        pdf.set_font("Helvetica", style="B", size=12)
-        for linea in textwrap.wrap(f"PREGUNTA: {_limpiar(item['pregunta'])}", width=80):
-            pdf.cell(0, 6, txt=linea, ln=True)
-        pdf.ln(2)
-
-        # Respuesta
-        pdf.set_font("Helvetica", size=11)
-        for linea in textwrap.wrap(_limpiar(item["respuesta"]), width=90):
-            pdf.cell(0, 6, txt=linea, ln=True)
-        pdf.ln(5)
-
-        # Fuentes
-        pdf.set_font("Helvetica", style="I", size=10)
-        pdf.cell(0, 6, txt="FUENTES CONSULTADAS:", ln=True)
-        for fuente in item["fuentes"]:
-            for linea in textwrap.wrap(f"- {_limpiar(fuente)}", width=90):
-                pdf.cell(0, 5, txt=linea, ln=True)
-        pdf.ln(10)
-
-    return bytes(pdf.output())
-
-# =============================================================================
-# 4. CLAVES DE ACCESO (desde st.secrets)
-# =============================================================================
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-
-# =============================================================================
-# 5. INICIALIZAR SERVICIOS (cacheados para no recargar en cada interacción)
-# =============================================================================
+# ==============================================================
+# 2. CARGA DE RECURSOS EN CACHÉ
+# ==============================================================
 @st.cache_resource
-def init_supabase():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+def load_embedding_model():
+    return SentenceTransformer(MODEL_NAME)
 
 @st.cache_resource
-def load_model():
-    # ⚠️  IMPORTANTE: NO cambiar este modelo.
-    # Debe coincidir exactamente con el que se usó para vectorizar los
-    # documentos en Supabase. Cambiarlo aquí sin re-vectorizar la BD
-    # produciría resultados de búsqueda incorrectos.
-    return SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
+def load_groq_client():
+    return Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+@st.cache_resource
+def load_faiss_and_meta(etapa):
+    archivos = {
+        "Infantil y Primaria": ("faiss_primaria.bin", "meta_primaria.json"),
+        "ESO y Bachillerato": ("faiss_secundaria.bin", "meta_secundaria.json"),
+        "Formación Profesional": ("faiss_fp.bin", "meta_fp.json")
+    }
+    bin_file, json_file = archivos.get(etapa, (None, None))
+
+    if not bin_file or not os.path.exists(bin_file) or not os.path.exists(json_file):
+        return None, None
+
+    index = faiss.read_index(bin_file)
+    with open(json_file, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+    return index, metadata
 
 @st.cache_data
-def cargar_diccionario_enlaces():
-    enlaces = {}
+def load_urls():
+    diccionario = {}
     if os.path.exists("enlaces.csv"):
-        with open("enlaces.csv", mode="r", encoding="utf-8") as f:
-            for i, fila in enumerate(csv.reader(f)):
-                if i == 0:
-                    continue  # cabecera
-                if len(fila) >= 2:
-                    enlaces[fila[0].strip()] = fila[1].strip()
-    return enlaces
+        try:
+            with open("enlaces.csv", "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if "nombre_archivo" in reader.fieldnames and "url_oficial_verificada" in reader.fieldnames:
+                    for row in reader:
+                        pdf_name = row["nombre_archivo"].strip()
+                        url = row.get("url_oficial_verificada", "").strip()
+                        if url and url.lower() != "nan":
+                            diccionario[pdf_name] = url
+        except Exception as e:
+            st.warning(f"⚠️ Error interno leyendo enlaces.csv: {e}")
+    return diccionario
 
-supabase            = init_supabase()
-model               = load_model()
-groq_client         = Groq(api_key=GROQ_API_KEY)
-diccionario_enlaces = cargar_diccionario_enlaces()
+embed_model = load_embedding_model()
+client = load_groq_client()
+diccionario_enlaces = load_urls()
 
-# =============================================================================
-# 6. INTERFAZ
-# =============================================================================
-st.title("📚 Buscador Inteligente de Normativa Educativa")
+# ==============================================================
+# 3. MOTOR DE GENERACIÓN DE PDF
+# ==============================================================
+def generar_pdf(mensajes, titulo="Documento Normativo"):
+    """Genera un archivo PDF a partir de una lista de mensajes"""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    estilo_normal = styles["Normal"]
+    estilo_titulo = styles["Title"]
+    
+    flowables = [Paragraph(titulo, estilo_titulo), Spacer(1, 20)]
+    
+    for msg in mensajes:
+        if msg["role"] == "system":
+            continue
+            
+        rol = "USUARIO" if msg["role"] == "user" else "ASISTENTE NORMATIVO"
+        
+        texto = escape(msg["content"])
+        texto = texto.encode('windows-1252', 'ignore').decode('windows-1252')
+        texto = texto.replace('\n', '<br/>')
+        texto = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', texto) 
+        texto = re.sub(r'\*(.*?)\*', r'<i>\1</i>', texto)     
+        
+        flowables.append(Paragraph(f"<b>[{rol}]</b>", estilo_normal))
+        flowables.append(Spacer(1, 5))
+        flowables.append(Paragraph(texto, estilo_normal))
+        flowables.append(Spacer(1, 15))
+        
+    doc.build(flowables)
+    pdf_bytes = buffer.getvalue()
+    buffer.close()
+    return pdf_bytes
 
-bloque_elegido = st.selectbox(
-    "Nivel educativo:",
-    ["ninguno", "infantil_primaria", "secundaria_bachillerato", "fp"],
-    format_func=lambda x: {
-        "ninguno":                   "Por favor, elige un nivel educativo",
-        "infantil_primaria":         "Infantil y Primaria",
-        "secundaria_bachillerato":   "Secundaria y Bachillerato",
-        "fp":                        "Formación Profesional",
-    }[x],
+# ==============================================================
+# 4. INTERFAZ DE USUARIO (UI)
+# ==============================================================
+st.title("📚 Asistente de Normativa Educativa - CyL")
+
+etapa_seleccionada = st.selectbox(
+    "Selecciona la Etapa Educativa:",
+    ["Infantil y Primaria", "ESO y Bachillerato", "Formación Profesional"]
 )
 
-with st.form(key="search_form"):
-    pregunta      = st.text_input("Haz tu pregunta sobre la normativa:")
-    submit_button = st.form_submit_button(label="🔍 Buscar")
+# Disclaimer estático debajo del selector
+st.markdown("<p style='text-align: center; font-size: 15px; color: #888;'>⚠️ <i>Este asistente utiliza IA y puede cometer errores. Contrasta siempre la información con documentos oficiales (BOCyL/BOE).</i></p>", unsafe_allow_html=True)
 
-# =============================================================================
-# 7. PROCESAMIENTO DE LA BÚSQUEDA
-# =============================================================================
-if submit_button and pregunta:
+st.divider()
 
-    if bloque_elegido == "ninguno":
-        st.warning("⚠️ Por favor, selecciona un nivel educativo antes de buscar.")
+index, metadata = load_faiss_and_meta(etapa_seleccionada)
 
-    else:
+if index is None or metadata is None:
+    st.error(f"⚠️ Faltan los archivos de la etapa seleccionada. Revisa que los archivos .bin y .json estén en GitHub.")
+    st.stop()
+
+# ==============================================================
+# 5. GESTIÓN DE LA MEMORIA Y CHAT (LIENZO EN BLANCO)
+# ==============================================================
+
+# Empezamos con el chat totalmente en blanco
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "current_etapa" not in st.session_state:
+    st.session_state.current_etapa = etapa_seleccionada
+
+# Si cambia la etapa educativa, simplemente limpiamos el chat para empezar de cero
+if st.session_state.current_etapa != etapa_seleccionada:
+    st.session_state.messages = []
+    st.session_state.current_etapa = etapa_seleccionada
+
+for i, msg in enumerate(st.session_state.messages):
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        
+        # Opciones de descarga solo en los mensajes del asistente
+        if msg["role"] == "assistant": 
+            msg_usuario = st.session_state.messages[i-1] if i>0 and st.session_state.messages[i-1]["role"] == "user" else {"role": "user", "content": "Consulta general"}
+            
+            mensajes_pdf_individual = [msg_usuario, msg]
+            pdf_individual = generar_pdf(mensajes_pdf_individual, "Consulta Normativa")
+            pdf_historial = generar_pdf(st.session_state.messages, "Historial de Consultas Normativas")
+            
+            col_espacio, col_btn_resp, col_btn_conv = st.columns([4, 3, 3])
+            
+            with col_btn_resp:
+                st.download_button(
+                    label="📥 Guardar respuesta",
+                    data=pdf_individual,
+                    file_name=f"consulta_normativa_{i}.pdf",
+                    mime="application/pdf",
+                    key=f"dl_resp_{i}",
+                    use_container_width=True
+                )
+                
+            with col_btn_conv:
+                st.download_button(
+                    label="📄 Guardar conversación",
+                    data=pdf_historial,
+                    file_name="historial_normativa.pdf",
+                    mime="application/pdf",
+                    key=f"dl_conv_{i}",
+                    use_container_width=True
+                )
+
+# ==============================================================
+# 6. LÓGICA DEL RAG (BÚSQUEDA Y CITAS)
+# ==============================================================
+def buscar_contexto(pregunta):
+    vector = embed_model.encode([pregunta], convert_to_numpy=True).astype('float32')
+    distancias, indices = index.search(vector, FETCH_CHUNKS)
+
+    contexto_textos = []
+    documentos_citados = set()
+
+    for idx in indices[0]:
+        if idx == -1 or idx >= len(metadata):
+            continue
+            
+        meta = metadata[idx]
+        texto = meta["chunk_text"]
+        doc_name = meta["doc_name"]
+        page = meta["page_num"]
+
+        nombre_real = doc_name.replace(".pdf", "").replace("_", " ")
+
+        url_oficial = diccionario_enlaces.get(doc_name)
+        if url_oficial:
+            cita_formateada = f"- [{nombre_real}]({url_oficial}) (Pág. {page})"
+        else:
+            cita_formateada = f"- {nombre_real} (Pág. {page})"
+
+        fragmento = f"--- [Documento: {nombre_real} | Página: {page}] ---\n{texto}\n"
+
+        if fragmento not in contexto_textos:
+            contexto_textos.append(fragmento)
+            documentos_citados.add(cita_formateada)
+
+        if len(contexto_textos) >= MAX_CHUNKS_TO_LLM:
+            break
+
+    return "\n".join(contexto_textos), list(documentos_citados)
+
+# ==============================================================
+# 7. INTERACCIÓN DEL USUARIO
+# ==============================================================
+if prompt := st.chat_input("Escribe tu pregunta sobre normativa..."):
+    
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Buscando en la normativa..."):
+            contexto_str, citas = buscar_contexto(prompt)
+            
+        mensajes_api = [
+            {"role": "system", "content": SYSTEM_PROMPT.format(context=contexto_str)}
+        ]
+
+        historial_previo = st.session_state.messages[:-1][-4:] 
+        for m in historial_previo:
+            contenido = m["content"]
+            if m["role"] == "assistant" and "**📚 Fuentes consultadas:**" in contenido:
+                contenido = contenido.split("\n\n---")[0].strip()
+                
+            mensajes_api.append({"role": m["role"], "content": contenido})
+
+        mensajes_api.append({"role": "user", "content": prompt})
+
+        respuesta_placeholder = st.empty()
+        respuesta_completa = ""
+
         try:
-            # --- 7a. Embedding + búsqueda vectorial en Supabase ---
-            with st.spinner("🔎 Buscando en la normativa..."):
-                embedding_pregunta = model.encode(pregunta).tolist()
+            stream = client.chat.completions.create(
+                model="llama-3.3-70b-versatile", 
+                messages=mensajes_api,
+                temperature=0.1, 
+                stream=True
+            )
 
-                respuesta_bd = supabase.rpc(
-                    "buscar_normativa",
-                    {
-                        "query_embedding": embedding_pregunta,
-                        "filtro_bloque":   bloque_elegido,
-                        "match_threshold": 0.5,
-                        # ↓ Reducido de 12 a 6: menos tokens, contexto más enfocado
-                        #   y sin riesgo de superar la ventana del modelo.
-                        "match_count":     6,
-                    },
-                ).execute()
-                resultados = respuesta_bd.data
+            for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    respuesta_completa += chunk.choices[0].delta.content
+                    respuesta_placeholder.markdown(respuesta_completa + "▌")
 
-            # --- 7b. Sin resultados ---
-            if not resultados:
-                st.warning(
-                    "No he encontrado normativa relacionada con tu pregunta "
-                    "en este nivel educativo. Prueba a reformularla o usar "
-                    "términos más específicos."
-                )
+            if citas and "no encuentro esa información exacta" not in respuesta_completa.lower():
+                citas_mostrar = citas[:4] 
+                pie_fuentes = "\n\n---\n**📚 Fuentes consultadas:**\n" + "\n".join(citas_mostrar)
+                respuesta_completa += pie_fuentes
 
-            else:
-                # --- 7c. Construir contexto y fuentes ---
-                contexto_para_ia  = ""
-                enlaces_fuentes   = []
-                textos_fuentes_pdf = []
-
-                for res in resultados:
-                    nombre_archivo = res["nombre_archivo"]
-                    pagina         = res["pagina_num"]
-                    nombre_limpio  = nombre_archivo.replace(".pdf", "").replace("_", " ")
-
-                    contexto_para_ia += (
-                        f"DOCUMENTO: {nombre_limpio} | PÁGINA: {pagina}\n"
-                        f"CONTENIDO: {res['contenido']}\n\n"
-                    )
-
-                    url_base = diccionario_enlaces.get(nombre_archivo)
-                    if url_base:
-                        enlaces_fuentes.append(
-                            f"[{nombre_limpio} (Pág. {pagina})]({url_base}#page={pagina})"
-                        )
-                        textos_fuentes_pdf.append(
-                            f"{nombre_limpio} (Pág. {pagina}) - Enlace: {url_base}"
-                        )
-                    else:
-                        enlaces_fuentes.append(
-                            f"**{nombre_limpio}** (Pág. {pagina}) *(enlace no disponible)*"
-                        )
-                        textos_fuentes_pdf.append(f"{nombre_limpio} (Pág. {pagina})")
-
-                # --- 7d. Construir los mensajes para la API ---
-                #
-                # MEJORA: el historial ya NO se pega como texto plano en el prompt.
-                # Se pasa como turnos reales de conversación en el array `messages`,
-                # que es el mecanismo nativo de los LLMs para el contexto conversacional.
-                #
-                prompt_sistema = (
-                    "Eres un experto asesor jurista especializado en normativa educativa española. "
-                    "Analiza el contexto normativo que se te proporciona y responde de forma clara "
-                    "y bien estructurada, usando párrafos separados. "
-                    "Cuando cites algo concreto, indica el nombre del documento y la página. "
-                    "Responde ÚNICAMENTE con la información que aparece en el contexto. "
-                    "Si la información no es suficiente para responder a la pregunta, dilo claramente. "
-                    "Nunca inventes ni supongas leyes, artículos o normativas."
-                )
-
-                mensajes = [{"role": "system", "content": prompt_sistema}]
-
-                # Añadir turno anterior como contexto conversacional real
-                if st.session_state.ultima_pregunta and st.session_state.ultima_respuesta:
-                    mensajes.append({
-                        "role": "user",
-                        "content": st.session_state.ultima_pregunta,
-                    })
-                    # Truncamos a 1500 chars para no desperdiciar tokens
-                    respuesta_prev = st.session_state.ultima_respuesta
-                    if len(respuesta_prev) > 1500:
-                        respuesta_prev = respuesta_prev[:1500] + "..."
-                    mensajes.append({
-                        "role": "assistant",
-                        "content": respuesta_prev,
-                    })
-
-                # Turno actual con el contexto normativo
-                mensajes.append({
-                    "role": "user",
-                    "content": (
-                        f"CONTEXTO NORMATIVO:\n{contexto_para_ia}\n\n"
-                        f"PREGUNTA: {pregunta}"
-                    ),
-                })
-
-                # --- 7e. Llamada a Groq con streaming ---
-                #
-                # MODELO: llama-3.3-70b-versatile
-                #   - Gratis en Groq (1.000 req/día en plan gratuito)
-                #   - 70 mil millones de parámetros vs 8B anterior
-                #   - Ventana de 128K tokens (vs 8K del modelo anterior)
-                #   - Calidad muy superior para textos jurídicos en español
-                #
-                # max_tokens=900: protege la cuota diaria gratuita.
-                # Sin este límite el modelo puede generar 3.000-4.000 tokens
-                # por respuesta, agotando el límite mucho antes.
-                #
-                st.write("---")
-                st.markdown("### 📝 Respuesta:")
-
-                stream = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=mensajes,
-                    temperature=0.1,   # bajo para respuestas factuales y consistentes
-                    max_tokens=900,    # ← protege la cuota gratuita (1.000 req/día)
-                    stream=True,
-                )
-
-                def _stream_gen():
-                    """Generador limpio para st.write_stream."""
-                    for chunk in stream:
-                        delta = chunk.choices[0].delta.content
-                        if delta:
-                            yield delta
-
-                texto_final = st.write_stream(_stream_gen())
-
-                # --- 7f. Mostrar fuentes ---
-                fuentes_unicas     = list(dict.fromkeys(enlaces_fuentes))
-                fuentes_unicas_pdf = list(dict.fromkeys(textos_fuentes_pdf))
-
-                st.markdown("### 📚 Fuentes consultadas:")
-                for fuente in fuentes_unicas:
-                    st.markdown(f"- 📄 {fuente}")
-
-                # --- 7g. Guardar en sesión ---
-                st.session_state.ultima_pregunta  = pregunta
-                st.session_state.ultima_respuesta = texto_final
-                st.session_state.ultimas_fuentes  = fuentes_unicas
-                st.session_state.historial_completo.append({
-                    "pregunta":  pregunta,
-                    "respuesta": texto_final,
-                    "fuentes":   fuentes_unicas_pdf,
-                })
+            respuesta_placeholder.markdown(respuesta_completa)
 
         except Exception as e:
-            err = str(e).lower()
-            if "429" in err or "rate_limit" in err or "rate limit" in err:
-                st.error(
-                    "⏳ Se ha alcanzado el límite de consultas del servicio de IA por hoy "
-                    "(1.000 consultas diarias en el plan gratuito). "
-                    "El límite se restablece automáticamente a medianoche UTC. "
-                    "Inténtalo de nuevo más tarde."
-                )
-            else:
-                st.error(f"Error técnico al procesar la consulta: {e}")
+            respuesta_completa = f"⚠️ Ocurrió un error al contactar con la IA: {e}"
+            respuesta_placeholder.markdown(respuesta_completa)
 
-# =============================================================================
-# 8. MOSTRAR LA ÚLTIMA RESPUESTA (solo cuando NO se acaba de buscar)
-#    Esto evita que la respuesta aparezca duplicada al hacer streaming.
-# =============================================================================
-elif st.session_state.ultima_respuesta:
-    st.write("---")
-    st.markdown(st.session_state.ultima_respuesta)
-
-    st.markdown("### 📚 Fuentes consultadas:")
-    for fuente in st.session_state.ultimas_fuentes:
-        st.markdown(f"- 📄 {fuente}")
-
-# =============================================================================
-# 9. BOTONES DE ACCIÓN (siempre visibles cuando hay historial)
-# =============================================================================
-if st.session_state.historial_completo:
-    st.write("---")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        pdf_actual = generar_pdf(
-            [st.session_state.historial_completo[-1]],
-            "Consulta de Normativa Educativa",
-        )
-        st.download_button(
-            label="📄 Descargar esta consulta",
-            data=pdf_actual,
-            file_name="consulta_normativa.pdf",
-            mime="application/pdf",
-        )
-
-    with col2:
-        pdf_historial = generar_pdf(
-            st.session_state.historial_completo,
-            "Historial Completo",
-        )
-        st.download_button(
-            label="📚 Descargar historial",
-            data=pdf_historial,
-            file_name="historial_normativa.pdf",
-            mime="application/pdf",
-        )
-
-    with col3:
-        if st.button("🔄 Reiniciar chat"):
-            st.session_state.ultima_pregunta   = None
-            st.session_state.ultima_respuesta  = None
-            st.session_state.ultimas_fuentes   = []
-            st.session_state.historial_completo = []
-            st.rerun()
+        st.session_state.messages.append({"role": "assistant", "content": respuesta_completa})
+        
+        st.rerun()
