@@ -1,7 +1,5 @@
 streamlit
-supabase
 sentence-transformers
-torch
-groq
-fpdf2
+faiss-cpu
 numpy
+groq
