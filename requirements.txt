@@ -1,6 +1,6 @@
 streamlit
+supabase
 sentence-transformers
-faiss-cpu
-numpy
+torch
 groq
-reportlab
+fpdf2
