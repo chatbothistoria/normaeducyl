@@ -1,5 +1,6 @@
 streamlit
-sentence-transformers
-faiss-cpu
 numpy
+faiss-cpu
+sentence-transformers
 groq
+reportlab
