@@ -2857,13 +2857,13 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
         modelos_a_intentar = catalogo
 
     if not modelos_a_intentar:
-        # Sin catálogo disponible (fallo de red al consultar OpenRouter)
-        class _RespSinModelos:
-            status_code = 0
-            text = "No se pudo obtener el catálogo de modelos de OpenRouter."
-            def json(self):
-                return {"error": {"message": "Sin modelos disponibles. Revisa IA_API_URL e IA_API_KEY."}}
-        return _RespSinModelos(), intentos
+        # Sin catálogo disponible (fallo de red al consultar OpenRouter) y sin
+        # IA_MODEL explícito en Secrets. Intentar con un modelo conocido de último recurso.
+        _fallback_hardcoded = [
+            "qwen/qwen3-235b-a22b:free",
+            "qwen/qwen3-30b-a3b:free",
+        ]
+        modelos_a_intentar = _fallback_hardcoded
 
     ultimo_resp = None
 
@@ -2905,14 +2905,16 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
 
             if resp.status_code == 200:
                 tipo = "ok"
+                resumen_err = ""
             else:
-                tipo, _ = _clasificar_error_ia(resp)
+                tipo, resumen_err = _clasificar_error_ia(resp)
 
             intentos.append({
                 "modelo": modelo_actual,
                 "intento": reintentos_temporales + 1,
                 "http_status": resp.status_code,
                 "tipo": tipo,
+                "error_raw": resumen_err[:300] if resumen_err else "",
                 "duracion_ms": round((time.time() - t_intento) * 1000, 2),
             })
 
@@ -2997,6 +2999,26 @@ with st.sidebar:
         st.session_state.modo_diagnostico = modo_diagnostico
         if modo_diagnostico:
             st.caption("Diagnóstico activo: visible solo en esta sesión de administrador.")
+
+        # ── Test de conexión IA ──────────────────────────────────────────────
+        if st.button("🔌 Test conexión IA", help="Hace una llamada mínima a la IA y muestra el resultado crudo."):
+            modelo_test = _resolver_modelo_ia()
+            st.caption(f"Modelo resuelto: `{modelo_test or '(ninguno)'}`")
+            st.caption(f"URL: `{IA_API_URL}`")
+            if not IA_API_URL or not IA_API_KEY:
+                st.error("IA_API_URL o IA_API_KEY no configurados en Secrets.")
+            else:
+                try:
+                    _r = _requests.post(
+                        IA_API_URL,
+                        headers={"Authorization": f"Bearer {IA_API_KEY}", "Content-Type": "application/json"},
+                        json={"model": modelo_test or "test", "messages": [{"role": "user", "content": "Di solo: OK"}], "max_tokens": 10},
+                        timeout=20,
+                    )
+                    st.code(f"HTTP {_r.status_code}\n{_r.text[:800]}", language="json")
+                except Exception as _ex:
+                    st.error(f"Excepción al conectar: {_ex}")
+
         if st.button("Cerrar acceso diagnóstico"):
             st.session_state.admin_diagnostico_ok = False
             st.session_state.modo_diagnostico = False
