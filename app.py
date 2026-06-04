@@ -2923,37 +2923,42 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
                 return resp, intentos
 
             if tipo == "modelo_no_encontrado":
-                # Este modelo ya no existe: limpiar caché y pasar al siguiente
+                # Modelo retirado: limpiar caché y pasar al siguiente sin esperar
                 _obtener_modelos_qwen_gratuitos.clear()
-                break  # sale del while, avanza al siguiente modelo
+                break  # avanza al siguiente modelo
 
-            puede_reintentar = tipo in ("limite_temporal", "servicio_temporal")
-            quedan_reintentos = reintentos_temporales < IA_REINTENTOS_TEMPORALES
-            if puede_reintentar and quedan_reintentos:
-                # Usar retry_after_seconds del JSON de OpenRouter si está disponible
-                try:
-                    _retry_hint = (
-                        resp.json()
-                        .get("error", {})
-                        .get("metadata", {})
-                        .get("retry_after_seconds", None)
-                    )
-                    espera = max(float(_retry_hint), 5.0) if _retry_hint else IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
-                except Exception:
-                    espera = IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
-                intentos[-1]["reintento_espera_segundos"] = espera
-                st.info(
-                    f"⏳ La IA ha devuelto un límite temporal. Reintentando en {int(espera)} segundos..."
-                )
-                time.sleep(espera)
-                reintentos_temporales += 1
-                continue
+            if tipo in ("limite_temporal", "servicio_temporal"):
+                # Estrategia: primero intentar otro modelo (más rápido que esperar),
+                # y solo si ya no quedan modelos alternativos, esperar y reintentar.
+                hay_mas_modelos = idx_modelo + 1 < len(modelos_a_intentar)
+                if hay_mas_modelos:
+                    break  # pasar al siguiente modelo sin esperar
 
-            # Error no recuperable con este modelo (configuracion, error_api, etc.)
-            # Si hay más modelos en la lista, probar el siguiente
+                # Último modelo disponible: reintentar con espera si quedan intentos
+                quedan_reintentos = reintentos_temporales < IA_REINTENTOS_TEMPORALES
+                if quedan_reintentos:
+                    try:
+                        _retry_hint = (
+                            resp.json()
+                            .get("error", {})
+                            .get("metadata", {})
+                            .get("retry_after_seconds", None)
+                        )
+                        espera = max(float(_retry_hint), 5.0) if _retry_hint else IA_REINTENTO_SEGUNDOS
+                    except Exception:
+                        espera = IA_REINTENTO_SEGUNDOS
+                    intentos[-1]["reintento_espera_segundos"] = espera
+                    st.info(f"⏳ La IA ha devuelto un límite temporal. Reintentando en {int(espera)} segundos...")
+                    time.sleep(espera)
+                    reintentos_temporales += 1
+                    continue
+
+                return resp, intentos  # agotados reintentos en el último modelo
+
+            # Error no recuperable (configuracion, error_api): pasar al siguiente modelo
             if idx_modelo + 1 < len(modelos_a_intentar):
-                break  # sale del while, avanza al siguiente modelo
-            return resp, intentos  # último modelo, devolver el error
+                break
+            return resp, intentos
 
     return ultimo_resp, intentos
 
