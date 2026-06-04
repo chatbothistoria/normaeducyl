@@ -2734,12 +2734,13 @@ def _clasificar_error_ia(resp):
     ]):
         return "configuracion", resumen
 
-    # 3. Límite de tasa — "tokens" y "limit" solos se eliminan: son demasiado
-    #    genéricos y aparecen en mensajes de modelo no encontrado o en el
-    #    payload reflejado por el proveedor en el cuerpo del error.
+    # 3. Límite de tasa — cubre variantes con espacio, guion y sin separador,
+    #    así como los mensajes de proveedores upstream (Venice, Together, etc.)
     if status == 429 or any(x in resumen_l for x in [
-        "rate limit", "quota", "too many requests", "too many",
-        "rate_limit", "ratelimit",
+        "rate limit", "rate-limit", "rate_limit", "ratelimit",
+        "quota", "too many requests", "too many",
+        "temporarily rate-limited", "temporarily unavailable",
+        "retry shortly", "retry after",
     ]):
         return "limite_temporal", resumen
 
@@ -2929,10 +2930,20 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
             puede_reintentar = tipo in ("limite_temporal", "servicio_temporal")
             quedan_reintentos = reintentos_temporales < IA_REINTENTOS_TEMPORALES
             if puede_reintentar and quedan_reintentos:
-                espera = IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
+                # Usar retry_after_seconds del JSON de OpenRouter si está disponible
+                try:
+                    _retry_hint = (
+                        resp.json()
+                        .get("error", {})
+                        .get("metadata", {})
+                        .get("retry_after_seconds", None)
+                    )
+                    espera = max(float(_retry_hint), 5.0) if _retry_hint else IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
+                except Exception:
+                    espera = IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
                 intentos[-1]["reintento_espera_segundos"] = espera
                 st.info(
-                    f"⏳ La IA ha devuelto un límite temporal. Reintentando en {espera} segundos..."
+                    f"⏳ La IA ha devuelto un límite temporal. Reintentando en {int(espera)} segundos..."
                 )
                 time.sleep(espera)
                 reintentos_temporales += 1
