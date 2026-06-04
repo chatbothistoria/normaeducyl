@@ -146,7 +146,7 @@ def _leer_secreto(nombre: str) -> str:
 
 IA_API_KEY = _leer_secreto("IA_API_KEY")
 IA_API_URL = _leer_secreto("IA_API_URL").rstrip("/")
-IA_MODEL = _leer_secreto("IA_MODEL")
+IA_MODEL = _leer_secreto("IA_MODEL")  # opcional: si está vacío, se autodescubre
 QDRANT_URL = _leer_secreto("QDRANT_URL").rstrip("/")
 QDRANT_API_KEY = _leer_secreto("QDRANT_API_KEY")
 ADMIN_DIAGNOSTIC_KEY = _leer_secreto("ADMIN_DIAGNOSTIC_KEY")
@@ -155,12 +155,105 @@ _secretos_faltantes = [
     nombre for nombre, valor in {
         "IA_API_KEY": IA_API_KEY,
         "IA_API_URL": IA_API_URL,
-        "IA_MODEL": IA_MODEL,
+        # IA_MODEL es opcional: si no está definido, se autodescubre en tiempo de ejecución
         "QDRANT_URL": QDRANT_URL,
         "QDRANT_API_KEY": QDRANT_API_KEY,
     }.items()
     if not valor
 ]
+
+
+# ---------------------------------------------------------------------------
+# AUTODESCUBRIMIENTO DE MODELO QWEN GRATUITO
+# ---------------------------------------------------------------------------
+# Si IA_MODEL no está definido en Secrets, la app consulta en tiempo real
+# el catálogo de OpenRouter y elige el mejor modelo Qwen gratuito disponible.
+# Así el nombre del modelo nunca queda hardcodeado: cuando Qwen publique
+# una versión nueva, la app la usará automáticamente sin tocar ningún fichero.
+
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
+# Palabras clave que deben aparecer en el ID del modelo para considerarlo
+# de la familia Qwen (instrucción, no thinking, no multimodal).
+_QWEN_INCLUDE = ["qwen"]
+_QWEN_EXCLUDE = ["vl", "coder", "math", "audio", "vision", "rerank"]
+
+def _extraer_parametros_b(model_id: str) -> float:
+    """Intenta estimar el nº de parámetros totales (B) desde el ID del modelo.
+
+    Ejemplos:
+        qwen/qwen3-235b-a22b:free  → 235.0
+        qwen/qwen3-30b-a3b:free    → 30.0
+        qwen/qwen3-7b:free         → 7.0
+    Devuelve 0.0 si no encuentra ningún número.
+    """
+    numeros = re.findall(r"(\d+(?:\.\d+)?)b", model_id.lower())
+    if numeros:
+        return max(float(n) for n in numeros)
+    return 0.0
+
+
+@st.cache_data(ttl=3600)  # refresca el catálogo cada hora como máximo
+def _obtener_modelos_qwen_gratuitos() -> list:
+    """Consulta el catálogo de OpenRouter y devuelve modelos Qwen gratuitos
+    ordenados de mayor a menor nº de parámetros.
+
+    Devuelve una lista de IDs de modelo, p.ej.:
+        ["qwen/qwen3-235b-a22b-07-25:free", "qwen/qwen3-235b-a22b:free", ...]
+    Si la consulta falla, devuelve una lista vacía.
+    """
+    try:
+        resp = _requests.get(_OPENROUTER_MODELS_URL, timeout=10)
+        if resp.status_code != 200:
+            return []
+        data = resp.json().get("data", [])
+    except Exception:
+        return []
+
+    candidatos = []
+    for m in data:
+        mid = (m.get("id") or "").lower()
+        pricing = m.get("pricing") or {}
+
+        # Debe ser gratuito (prompt y completion a "0")
+        es_gratis = (
+            str(pricing.get("prompt", "1")) == "0"
+            and str(pricing.get("completion", "1")) == "0"
+        )
+        if not es_gratis:
+            continue
+
+        # Debe pertenecer a la familia Qwen
+        if not any(k in mid for k in _QWEN_INCLUDE):
+            continue
+
+        # Excluir variantes especializadas o multimodales
+        if any(k in mid for k in _QWEN_EXCLUDE):
+            continue
+
+        candidatos.append((mid, _extraer_parametros_b(mid)))
+
+    # Ordenar: más parámetros primero; en empate, orden alfabético inverso
+    # (versiones más recientes suelen tener fecha mayor en el ID)
+    candidatos.sort(key=lambda x: (x[1], x[0]), reverse=True)
+    return [mid for mid, _ in candidatos]
+
+
+def _resolver_modelo_ia() -> str:
+    """Devuelve el modelo a usar, en este orden de preferencia:
+
+    1. El definido explícitamente en IA_MODEL (Secrets / variable de entorno).
+    2. El mejor modelo Qwen gratuito encontrado en el catálogo de OpenRouter.
+    3. Cadena vacía si nada funciona (la llamada a la API fallará con error claro).
+    """
+    if IA_MODEL:
+        return IA_MODEL
+
+    modelos = _obtener_modelos_qwen_gratuitos()
+    if modelos:
+        return modelos[0]
+
+    return ""
 
 def _url_http_valida(valor: str) -> bool:
     """Valida que una URL de configuración tenga esquema HTTP/HTTPS.
@@ -182,9 +275,11 @@ if _secretos_faltantes or _secretos_mal_formados:
     st.error("Faltan claves obligatorias en los Secrets de Streamlit.")
     st.write("Añade estas claves en Streamlit Cloud: **Manage app → Settings → Secrets**.")
     st.code(
-        '''IA_API_KEY = "pega_aqui_tu_clave_de_ia"
-IA_API_URL = "https://endpoint-del-proveedor/v1/chat/completions"
-IA_MODEL = "nombre-del-modelo"
+        '''IA_API_KEY = "pega_aqui_tu_clave_de_openrouter"
+IA_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+# IA_MODEL es opcional: si se omite, la app elige automáticamente
+# el mejor modelo Qwen gratuito disponible en OpenRouter.
+# IA_MODEL = "qwen/qwen3-235b-a22b-07-25:free"
 QDRANT_URL = "https://tu-cluster.cloud.qdrant.io"
 QDRANT_API_KEY = "pega_aqui_tu_clave_de_qdrant"''',
         language="toml",
@@ -2624,6 +2719,9 @@ def _clasificar_error_ia(resp):
         return "limite_temporal", resumen
     if status in (401, 403) or any(x in resumen_l for x in ["unauthorized", "forbidden", "api key", "api_key", "invalid key"]):
         return "configuracion", resumen
+    # Modelo no encontrado (nombre cambiado o retirado por el proveedor)
+    if status == 404 or any(x in resumen_l for x in ["model not found", "no such model", "unknown model", "invalid model", "does not exist"]):
+        return "modelo_no_encontrado", resumen
     if status and status >= 500:
         return "servicio_temporal", resumen
     return "error_api", resumen
@@ -2680,6 +2778,16 @@ def _mostrar_error_ia(resp, diagnostico_base=None, modo_diagnostico=False):
         st.error(
             "❌ Error de configuración de la IA. Revisa las claves y parámetros de IA en los Secrets de Streamlit."
         )
+    elif tipo == "modelo_no_encontrado":
+        # Forzar refresco del catálogo para que en la próxima consulta se elija
+        # un modelo disponible (el nombre actual puede haber sido retirado).
+        _obtener_modelos_qwen_gratuitos.clear()
+        st.warning(
+            "⚠️ El modelo de IA configurado no está disponible en este momento "
+            "(puede haber cambiado de nombre o estar temporalmente retirado). "
+            "La app intentará seleccionar automáticamente el mejor modelo disponible "
+            "en tu próxima consulta. Si el problema persiste, revisa IA_MODEL en los Secrets."
+        )
     elif tipo == "servicio_temporal":
         st.warning(
             "⏳ La IA no está disponible temporalmente. Puedes reintentarlo en unos minutos. "
@@ -2695,87 +2803,121 @@ def _mostrar_error_ia(resp, diagnostico_base=None, modo_diagnostico=False):
 
 
 def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
-    """Llama a la IA y reintenta de forma prudente ante límites temporales.
+    """Llama a la IA con autodescubrimiento de modelo y fallback automático.
 
-    Reintenta solo errores clasificados como límite temporal o servicio temporal.
-    No cambia el proveedor, no usa servicios adicionales y mantiene coste 0.
-    Devuelve (response, intentos), donde intentos no contiene claves ni contenido de la pregunta.
+    Estrategia de resiliencia en dos dimensiones:
+    1. Fallback por modelo: si el modelo actual no existe (nombre cambiado o
+       retirado), prueba automáticamente el siguiente modelo Qwen gratuito del
+       catálogo de OpenRouter. Nunca hay que tocar ningún fichero ni Secret.
+    2. Reintento temporal: ante límites de tasa o servicio caído, reintenta
+       con espera progresiva antes de rendirse.
+
+    Mantiene coste 0: solo usa modelos gratuitos de OpenRouter.
+    Devuelve (response, intentos).
     """
-    payload = {
-        "model": IA_MODEL,
-        "messages": mensajes,
-        "temperature": 0.1,
-        "max_tokens": MAX_TOKENS_RESPUESTA,
-    }
     headers = {
         "Authorization": f"Bearer {IA_API_KEY}",
         "Content-Type": "application/json",
     }
-
     intentos = []
+
+    # Construir la lista de modelos a intentar:
+    # 1º el modelo preferido (Secret o autodescubierto), luego el resto del catálogo
+    modelo_preferido = _resolver_modelo_ia()
+    catalogo = _obtener_modelos_qwen_gratuitos()
+
+    if modelo_preferido and modelo_preferido not in catalogo:
+        modelos_a_intentar = [modelo_preferido] + catalogo
+    elif modelo_preferido:
+        modelos_a_intentar = [modelo_preferido] + [m for m in catalogo if m != modelo_preferido]
+    else:
+        modelos_a_intentar = catalogo
+
+    if not modelos_a_intentar:
+        # Sin catálogo disponible (fallo de red al consultar OpenRouter)
+        class _RespSinModelos:
+            status_code = 0
+            text = "No se pudo obtener el catálogo de modelos de OpenRouter."
+            def json(self):
+                return {"error": {"message": "Sin modelos disponibles. Revisa IA_API_URL e IA_API_KEY."}}
+        return _RespSinModelos(), intentos
+
     ultimo_resp = None
 
-    for intento in range(IA_REINTENTOS_TEMPORALES + 1):
-        t_intento = time.time()
-        try:
-            resp = _requests.post(
-                IA_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=60,
-            )
-        except _requests.exceptions.RequestException as e:
-            class _RespuestaIAConfigError:
-                status_code = 0
-                text = "Error de configuración o conexión con el proveedor de IA."
+    for idx_modelo, modelo_actual in enumerate(modelos_a_intentar):
+        reintentos_temporales = 0
 
-                def json(self):
-                    return {
-                        "error": {
-                            "message": "No se pudo llamar al proveedor de IA. Revisa IA_API_URL, IA_API_KEY e IA_MODEL."
-                        }
-                    }
+        while reintentos_temporales <= IA_REINTENTOS_TEMPORALES:
+            t_intento = time.time()
+            payload = {
+                "model": modelo_actual,
+                "messages": mensajes,
+                "temperature": 0.1,
+                "max_tokens": MAX_TOKENS_RESPUESTA,
+            }
+            try:
+                resp = _requests.post(
+                    IA_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                )
+            except _requests.exceptions.RequestException:
+                class _RespConexionError:
+                    status_code = 0
+                    text = "Error de conexión con el proveedor de IA."
+                    def json(self):
+                        return {"error": {"message": "No se pudo conectar. Revisa IA_API_URL e IA_API_KEY."}}
+                resp = _RespConexionError()
+                intentos.append({
+                    "modelo": modelo_actual,
+                    "intento": reintentos_temporales + 1,
+                    "http_status": 0,
+                    "tipo": "configuracion",
+                    "duracion_ms": round((time.time() - t_intento) * 1000, 2),
+                })
+                return resp, intentos
 
-            resp = _RespuestaIAConfigError()
+            ultimo_resp = resp
+
+            if resp.status_code == 200:
+                tipo = "ok"
+            else:
+                tipo, _ = _clasificar_error_ia(resp)
+
             intentos.append({
-                "intento": intento + 1,
-                "http_status": 0,
-                "tipo": "configuracion",
+                "modelo": modelo_actual,
+                "intento": reintentos_temporales + 1,
+                "http_status": resp.status_code,
+                "tipo": tipo,
                 "duracion_ms": round((time.time() - t_intento) * 1000, 2),
             })
-            return resp, intentos
 
-        ultimo_resp = resp
+            if resp.status_code == 200:
+                return resp, intentos
 
-        if resp.status_code == 200:
-            tipo = "ok"
-            resumen = ""
-        else:
-            tipo, resumen = _clasificar_error_ia(resp)
+            if tipo == "modelo_no_encontrado":
+                # Este modelo ya no existe: limpiar caché y pasar al siguiente
+                _obtener_modelos_qwen_gratuitos.clear()
+                break  # sale del while, avanza al siguiente modelo
 
-        registro_intento = {
-            "intento": intento + 1,
-            "http_status": resp.status_code,
-            "tipo": tipo,
-            "duracion_ms": round((time.time() - t_intento) * 1000, 2),
-        }
-        intentos.append(registro_intento)
+            puede_reintentar = tipo in ("limite_temporal", "servicio_temporal")
+            quedan_reintentos = reintentos_temporales < IA_REINTENTOS_TEMPORALES
+            if puede_reintentar and quedan_reintentos:
+                espera = IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** reintentos_temporales)
+                intentos[-1]["reintento_espera_segundos"] = espera
+                st.info(
+                    f"⏳ La IA ha devuelto un límite temporal. Reintentando en {espera} segundos..."
+                )
+                time.sleep(espera)
+                reintentos_temporales += 1
+                continue
 
-        if resp.status_code == 200:
-            return resp, intentos
-
-        puede_reintentar = tipo in ("limite_temporal", "servicio_temporal")
-        quedan_reintentos = intento < IA_REINTENTOS_TEMPORALES
-        if puede_reintentar and quedan_reintentos:
-            espera = IA_REINTENTO_SEGUNDOS * (IA_REINTENTO_BACKOFF ** intento)
-            registro_intento["reintento_espera_segundos"] = espera
-            st.info(
-                f"⏳ La IA ha devuelto un límite temporal. Reintentando en {espera} segundos..."
-            )
-            time.sleep(espera)
-            continue
-
-        return resp, intentos
+            # Error no recuperable con este modelo (configuracion, error_api, etc.)
+            # Si hay más modelos en la lista, probar el siguiente
+            if idx_modelo + 1 < len(modelos_a_intentar):
+                break  # sale del while, avanza al siguiente modelo
+            return resp, intentos  # último modelo, devolver el error
 
     return ultimo_resp, intentos
 
