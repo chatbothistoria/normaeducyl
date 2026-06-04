@@ -176,7 +176,7 @@ _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # Palabras clave que deben aparecer en el ID del modelo para considerarlo
 # de la familia Qwen (instrucción, no thinking, no multimodal).
 _QWEN_INCLUDE = ["qwen"]
-_QWEN_EXCLUDE = ["vl", "coder", "math", "audio", "vision", "rerank"]
+_QWEN_EXCLUDE = ["vl", "coder", "math", "audio", "vision", "rerank", "next", "preview", "draft"]
 
 def _extraer_parametros_b(model_id: str) -> float:
     """Intenta estimar el nº de parámetros totales (B) desde el ID del modelo.
@@ -2878,6 +2878,12 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
                 "messages": mensajes,
                 "temperature": 0.1,
                 "max_tokens": MAX_TOKENS_RESPUESTA,
+                # Excluir proveedores conocidos por saturación crónica en free tier.
+                # OpenRouter intentará otros proveedores que sirvan el mismo modelo.
+                "provider": {
+                    "ignore": ["Venice"],
+                    "allow_fallbacks": True,
+                },
             }
             try:
                 resp = _requests.post(
