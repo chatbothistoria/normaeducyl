@@ -2710,20 +2710,43 @@ def _resumen_error_proveedor_ia(resp) -> str:
 
 
 def _clasificar_error_ia(resp):
-    """Clasifica errores del proveedor de IA sin asumir que un 429 sea diario."""
+    """Clasifica errores del proveedor de IA.
+
+    Orden importante: las señales más específicas van primero para evitar
+    que palabras genéricas enmascaren el tipo real del error.
+    """
     status = getattr(resp, "status_code", None)
     resumen = _resumen_error_proveedor_ia(resp)
     resumen_l = resumen.lower()
 
-    if status == 429 or any(x in resumen_l for x in ["rate", "quota", "limit", "tokens", "too many"]):
-        return "limite_temporal", resumen
-    if status in (401, 403) or any(x in resumen_l for x in ["unauthorized", "forbidden", "api key", "api_key", "invalid key"]):
-        return "configuracion", resumen
-    # Modelo no encontrado (nombre cambiado o retirado por el proveedor)
-    if status == 404 or any(x in resumen_l for x in ["model not found", "no such model", "unknown model", "invalid model", "does not exist"]):
+    # 1. Modelo no encontrado — va PRIMERO porque su respuesta puede contener
+    #    palabras como "invalid" que también aparecen en errores de autenticación,
+    #    y "limit" que aparece en errores de rate limit.
+    if status == 404 or any(x in resumen_l for x in [
+        "model not found", "no such model", "unknown model",
+        "invalid model", "does not exist", "model_not_found",
+    ]):
         return "modelo_no_encontrado", resumen
+
+    # 2. Error de autenticación / clave incorrecta
+    if status in (401, 403) or any(x in resumen_l for x in [
+        "unauthorized", "forbidden", "api key", "api_key", "invalid key",
+    ]):
+        return "configuracion", resumen
+
+    # 3. Límite de tasa — "tokens" y "limit" solos se eliminan: son demasiado
+    #    genéricos y aparecen en mensajes de modelo no encontrado o en el
+    #    payload reflejado por el proveedor en el cuerpo del error.
+    if status == 429 or any(x in resumen_l for x in [
+        "rate limit", "quota", "too many requests", "too many",
+        "rate_limit", "ratelimit",
+    ]):
+        return "limite_temporal", resumen
+
+    # 4. Error del servidor del proveedor
     if status and status >= 500:
         return "servicio_temporal", resumen
+
     return "error_api", resumen
 
 
