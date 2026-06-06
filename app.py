@@ -22,7 +22,7 @@ IA_REINTENTO_SEGUNDOS    = 20     # espera base antes del reintento automático
 IA_REINTENTO_BACKOFF     = 2      # backoff progresivo: 20s, 40s
 MAX_CHARS_PREGUNTA    = 500
 MAX_CHARS_CONTEXTO    = 18000
-MAX_PREGUNTAS_SESION  = 10
+MAX_PREGUNTAS_SESION  = 25
 MATCH_THRESHOLD_ALTO  = 0.40
 MATCH_THRESHOLD_BAJO  = 0.25
 MATCH_COUNT           = 8      # fragmentos finales enviados al LLM
@@ -31,6 +31,7 @@ HISTORIAL_TURNOS      = 0      # seguridad jurídica: no arrastrar respuestas pr
 MAX_HISTORIAL_LOCAL   = 10
 COLLECTION_NAME       = "normativa"
 FAQ_FILE              = "faq_normativa.json"
+VERSION_APP           = "v073b"
 FAQ_MATCH_MIN_RATIO   = 0.88
 FAQ_MATCH_MIN_COVER   = 0.78
 
@@ -303,7 +304,6 @@ if QDRANT_URL and not _url_http_valida(QDRANT_URL):
     _secretos_mal_formados.append("QDRANT_URL debe ser una URL completa que empiece por https://")
 
 if _secretos_faltantes or _secretos_mal_formados:
-    st.title("📚 NormaEdu 2")
     st.error("Faltan claves obligatorias en los Secrets de Streamlit.")
     st.write("Añade estas claves en Streamlit Cloud: **Manage app → Settings → Secrets**.")
     st.code(
@@ -2576,7 +2576,7 @@ def construir_trazabilidad_historial(
     No contiene pregunta, respuesta, claves ni contenido de fragmentos.
     """
     return {
-        "version_app": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+        "version_app": VERSION_APP,
         "ruta": ruta,
         "apartado": apartado,
         "faq_id": faq_id or "",
@@ -3100,14 +3100,36 @@ with st.sidebar:
     else:
         st.session_state.modo_diagnostico = False
 
-st.title("📚 NormaEdu 2")
+_nivel_label = {
+    "ninguno":                 "",
+    "general":                 " · General",
+    "infantil_primaria":       " · Infantil y Primaria",
+    "secundaria_bachillerato": " · Secundaria y Bachillerato",
+    "fp":                      " · FP",
+}.get(st.session_state.get("_bloque_elegido_actual", "ninguno"), "")
+st.title(f"📚 NormaEdu 2{_nivel_label}")
 
-st.warning(
-    "No introduzcas nombres, DNI, expedientes, datos médicos, sanciones ni "
-    "información que permita identificar a alumnos, familias, docentes u otras personas. "
-    "La app no guarda tus preguntas en bases de datos externas, pero la consulta se envía "
-    "al servicio gratuito de IA para generar la respuesta."
-)
+# Aviso de privacidad: solo se muestra expandido la primera vez por sesión.
+if not st.session_state.get("_aviso_privacidad_visto", False):
+    st.warning(
+        "⚠️ **Aviso de privacidad:** No introduzcas nombres, DNI, expedientes, datos médicos, "
+        "sanciones ni información que permita identificar a alumnos, familias, docentes u otras personas. "
+        "La app no guarda tus preguntas en bases de datos externas, pero la consulta se envía "
+        "al servicio gratuito de IA para generar la respuesta."
+    )
+    if st.button("Entendido, no volver a mostrar en esta sesión"):
+        st.session_state._aviso_privacidad_visto = True
+        st.rerun()
+else:
+    with st.expander("ℹ️ Aviso de privacidad", expanded=False):
+        st.caption(
+            "No introduzcas nombres, DNI, expedientes, datos médicos ni información identificativa. "
+            "La consulta se envía al servicio de IA para generar la respuesta."
+        )
+
+# Guardar bloque en session_state para que el título dinámico lo refleje
+if "bloque_elegido" not in st.session_state:
+    st.session_state._bloque_elegido_actual = "ninguno"
 
 bloque_elegido = st.selectbox(
     "Nivel educativo:",
@@ -3120,6 +3142,7 @@ bloque_elegido = st.selectbox(
         "fp":                      "🔧 Formación Profesional",
     }[x],
 )
+st.session_state._bloque_elegido_actual = bloque_elegido
 
 
 with st.form(key="form_busqueda"):
@@ -3172,7 +3195,7 @@ if submit and pregunta_input:
                 st.caption(formatear_trazabilidad_compacta(trazabilidad))
 
                 diagnostico = {
-                    "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                    "version": VERSION_APP,
                     "capa_usada": "FAQ",
                     "consume_ia": False,
                     "consume_qdrant": False,
@@ -3235,7 +3258,7 @@ if submit and pregunta_input:
                 st.caption(formatear_trazabilidad_compacta(trazabilidad))
 
                 diagnostico = {
-                    "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                    "version": VERSION_APP,
                     "capa_usada": "FILTRO_SEGURIDAD",
                     "consume_ia": False,
                     "consume_qdrant": False,
@@ -3295,7 +3318,7 @@ if submit and pregunta_input:
                 st.caption(formatear_trazabilidad_compacta(trazabilidad))
 
                 diagnostico = {
-                    "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                    "version": VERSION_APP,
                     "capa_usada": "FILTRO_DOMINIO",
                     "consume_ia": False,
                     "consume_qdrant": False,
@@ -3338,13 +3361,13 @@ if submit and pregunta_input:
                 try:
                     t0 = time.time()
 
-                    with st.spinner("✏️ Analizando la consulta..."):
+                    with st.spinner("✏️ Revisando tu consulta..."):
                         pregunta_corregida, reformulaciones = expandir_y_corregir(pregunta_input)
 
                     if pregunta_corregida.strip().lower() != pregunta_input.strip().lower():
                         st.info(f"✏️ He corregido tu consulta a: **{pregunta_corregida}**")
 
-                    with st.spinner("🔎 Buscando en la normativa..."):
+                    with st.spinner("🔎 Buscando en los documentos normativos..."):
                         # e5 requiere prefijo "query: " en las consultas
                         todas = [pregunta_corregida] + reformulaciones[:2]
                         embedding_avg = np.mean(
@@ -3358,7 +3381,7 @@ if submit and pregunta_input:
                     if not resultados:
                         st.warning("No encontré normativa relacionada. Prueba a reformular la pregunta.")
                         diagnostico = {
-                            "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                            "version": VERSION_APP,
                             "capa_usada": "RAG",
                             "estado": "sin_resultados",
                             "consume_qdrant": True,
@@ -3375,7 +3398,7 @@ if submit and pregunta_input:
                         guardar_log(bloque_elegido, pregunta_input, pregunta_corregida,
                                     0, (time.time()-t0)*1000, False)
                     else:
-                        with st.spinner("📊 Ordenando por relevancia..."):
+                        with st.spinner("📊 Seleccionando los fragmentos más relevantes..."):
                             resultados = reranquear(pregunta_corregida, resultados)
                             resultados = resultados[:MATCH_COUNT]
 
@@ -3394,7 +3417,7 @@ if submit and pregunta_input:
                         )
                         if _resp.status_code != 200:
                             diagnostico_base = {
-                                "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                                "version": VERSION_APP,
                                 "bloque_seleccionado": bloque_elegido,
                                 "resultados_enviados_llm": len(resultados),
                                 "fragmentos": _diagnostico_fragmentos(resultados),
@@ -3525,7 +3548,7 @@ if submit and pregunta_input:
                         st.caption(formatear_trazabilidad_compacta(trazabilidad))
 
                         diagnostico = {
-                            "version": "v073b_postvalidacion_r7_filtros_faq_prudencia",
+                            "version": VERSION_APP,
                             "capa_usada": ruta_trazabilidad,
                             "consume_qdrant": True,
                             "consume_ia": True,
@@ -3599,27 +3622,7 @@ elif st.session_state.ultima_respuesta:
     if modo_diagnostico:
         mostrar_diagnostico(st.session_state.get("ultimo_diagnostico"))
 
-# =============================================================================
-# FEEDBACK
-# =============================================================================
-if st.session_state.feedback_pendiente:
-    st.markdown("---")
-    st.markdown("**¿Te ha resultado útil esta respuesta?**")
-    c1, c2, c3 = st.columns([1, 1, 5])
-    with c1:
-        if st.button("👍 Sí"):
-            guardar_feedback(st.session_state.feedback_pregunta,
-                             st.session_state.feedback_respuesta, True)
-            st.session_state.feedback_pendiente = False
-            st.success("¡Gracias! Feedback recibido solo en esta sesión; no se guarda en base de datos.")
-            st.rerun()
-    with c2:
-        if st.button("👎 No"):
-            guardar_feedback(st.session_state.feedback_pregunta,
-                             st.session_state.feedback_respuesta, False)
-            st.session_state.feedback_pendiente = False
-            st.info("Gracias. Feedback recibido solo en esta sesión; no se guarda en base de datos.")
-            st.rerun()
+# Feedback eliminado: guardar_feedback está desactivada y no aporta valor al usuario.
 
 # =============================================================================
 # HISTORIAL EN PANTALLA
@@ -3628,10 +3631,15 @@ historial = st.session_state.historial_completo
 if len(historial) > 1:
     st.write("---")
     with st.expander(f"📋 Historial ({len(historial)} consultas)", expanded=False):
-        for item in reversed(historial[:-1]):
+        for idx_h, item in enumerate(reversed(historial[:-1])):
             st.markdown(f"**Pregunta:** {item['pregunta']}")
             prev = str(item["respuesta"] or "")
-            st.markdown(prev[:400] + "..." if len(prev) > 400 else prev)
+            if len(prev) > 600:
+                with st.expander("Ver respuesta completa", expanded=False):
+                    st.markdown(prev)
+                st.markdown(prev[:600] + "...")
+            else:
+                st.markdown(prev)
             if item.get("trazabilidad"):
                 st.caption(formatear_trazabilidad_compacta(item.get("trazabilidad")))
             st.divider()
