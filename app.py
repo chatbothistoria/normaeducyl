@@ -173,10 +173,23 @@ _secretos_faltantes = [
 
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
-# Palabras clave que deben aparecer en el ID del modelo para considerarlo
-# de la familia Qwen (instrucción, no thinking, no multimodal).
-_QWEN_INCLUDE = ["qwen"]
-_QWEN_EXCLUDE = ["vl", "coder", "math", "audio", "vision", "rerank", "next", "preview", "draft"]
+# Modelos preferidos por orden de prioridad (los mejores gratuitos disponibles en OpenRouter).
+# Se usan como fallback hardcodeado cuando el catálogo no está disponible.
+# Actualizados a junio 2026 según disponibilidad real en OpenRouter.
+_MODELOS_PREFERIDOS_HARDCODED = [
+    "nvidia/nemotron-3-super-120b-a12b:free",   # 120B params, calidad alta, tools
+    "google/gemma-4-31b-it:free",               # 31B, mejor puntuado en OpenRouter
+    "meta-llama/llama-3.3-70b-instruct:free",   # 70B, muy estable y conocido
+    "nvidia/nemotron-3-nano-30b-a3b:free",      # 30B, buen equilibrio
+    "qwen/qwen3-next-80b-a3b-instruct:free",    # 80B Qwen, último recurso
+]
+
+# Palabras clave para filtrar modelos del catálogo dinámico.
+# Incluimos los mejores modelos de propósito general para textos complejos.
+_MODELO_INCLUDE = ["nemotron", "llama", "gemma", "qwen", "glm", "mistral", "kimi"]
+_MODELO_EXCLUDE = ["vl", "coder", "math", "audio", "vision", "rerank", "next",
+                   "preview", "draft", "omni", "safety", "clip", "lyria",
+                   "reasoning", "nano", "1.2b", "3b", "owl"]
 
 def _extraer_parametros_b(model_id: str) -> float:
     """Intenta estimar el nº de parámetros totales (B) desde el ID del modelo.
@@ -194,16 +207,14 @@ def _extraer_parametros_b(model_id: str) -> float:
 
 
 def _obtener_modelos_qwen_gratuitos() -> list:
-    """Consulta el catálogo de OpenRouter y devuelve modelos Qwen gratuitos
+    """Consulta el catálogo de OpenRouter y devuelve modelos gratuitos de propósito general
     ordenados de mayor a menor nº de parámetros.
 
     Usa st.session_state como caché con TTL de 1 hora para evitar llamadas
     repetidas, pero garantiza que la primera llamada siempre funciona
     (a diferencia de @st.cache_data que puede fallar en el arranque).
 
-    Devuelve una lista de IDs de modelo, p.ej.:
-        ["qwen/qwen3-235b-a22b-07-25:free", "qwen/qwen3-235b-a22b:free", ...]
-    Si la consulta falla, devuelve una lista vacía.
+    Si la consulta falla, devuelve lista vacía (se usará _MODELOS_PREFERIDOS_HARDCODED).
     """
     import time as _time
 
@@ -242,12 +253,12 @@ def _obtener_modelos_qwen_gratuitos() -> list:
         if not es_gratis:
             continue
 
-        # Debe pertenecer a la familia Qwen
-        if not any(k in mid for k in _QWEN_INCLUDE):
+        # Debe pertenecer a alguna familia de modelos de propósito general
+        if not any(k in mid for k in _MODELO_INCLUDE):
             continue
 
-        # Excluir variantes especializadas o multimodales
-        if any(k in mid for k in _QWEN_EXCLUDE):
+        # Excluir variantes especializadas, multimodales o demasiado pequeñas
+        if any(k in mid for k in _MODELO_EXCLUDE):
             continue
 
         candidatos.append((mid, _extraer_parametros_b(mid)))
@@ -2882,11 +2893,7 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
     if not modelos_a_intentar:
         # Sin catálogo disponible (fallo de red al consultar OpenRouter) y sin
         # IA_MODEL explícito en Secrets. Intentar con un modelo conocido de último recurso.
-        _fallback_hardcoded = [
-            "qwen/qwen3-235b-a22b:free",
-            "qwen/qwen3-30b-a3b:free",
-        ]
-        modelos_a_intentar = _fallback_hardcoded
+        modelos_a_intentar = list(_MODELOS_PREFERIDOS_HARDCODED)
 
     ultimo_resp = None
 
@@ -2902,10 +2909,8 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
                 "max_tokens": MAX_TOKENS_RESPUESTA,
                 # Excluir proveedores conocidos por saturación crónica en free tier.
                 # OpenRouter intentará otros proveedores que sirvan el mismo modelo.
-                "provider": {
-                    "ignore": ["Venice"],
-                    "allow_fallbacks": True,
-                },
+                # openrouter/free gestiona el routing internamente;
+                # no forzamos proveedor para no interferir con su lógica.
             }
             try:
                 resp = _requests.post(
