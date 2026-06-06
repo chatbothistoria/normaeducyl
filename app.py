@@ -3607,7 +3607,7 @@ if len(historial) > 1:
     with st.expander(f"📋 Historial ({len(historial)} consultas)", expanded=False):
         for item in reversed(historial[:-1]):
             st.markdown(f"**Pregunta:** {item['pregunta']}")
-            prev = item["respuesta"]
+            prev = str(item["respuesta"] or "")
             st.markdown(prev[:400] + "..." if len(prev) > 400 else prev)
             if item.get("trazabilidad"):
                 st.caption(formatear_trazabilidad_compacta(item.get("trazabilidad")))
