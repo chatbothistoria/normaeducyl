@@ -86,6 +86,7 @@ _UNICODE_FIX = {
 }
 
 def _limpiar(texto):
+    texto = str(texto or "")  # garantiza cadena aunque llegue None o dict
     for orig, repl in _UNICODE_FIX.items():
         texto = texto.replace(orig, repl)
     return texto.encode("latin-1", "replace").decode("latin-1")
