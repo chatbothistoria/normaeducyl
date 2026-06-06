@@ -193,21 +193,40 @@ def _extraer_parametros_b(model_id: str) -> float:
     return 0.0
 
 
-@st.cache_data(ttl=3600)  # refresca el catálogo cada hora como máximo
 def _obtener_modelos_qwen_gratuitos() -> list:
     """Consulta el catálogo de OpenRouter y devuelve modelos Qwen gratuitos
     ordenados de mayor a menor nº de parámetros.
+
+    Usa st.session_state como caché con TTL de 1 hora para evitar llamadas
+    repetidas, pero garantiza que la primera llamada siempre funciona
+    (a diferencia de @st.cache_data que puede fallar en el arranque).
 
     Devuelve una lista de IDs de modelo, p.ej.:
         ["qwen/qwen3-235b-a22b-07-25:free", "qwen/qwen3-235b-a22b:free", ...]
     Si la consulta falla, devuelve una lista vacía.
     """
+    import time as _time
+
+    # Caché en session_state: válida durante 1 hora
+    _cache_key = "_catalogo_qwen_cache"
+    _cache_ts_key = "_catalogo_qwen_ts"
+    _ttl = 3600
+
+    cached = st.session_state.get(_cache_key)
+    cached_ts = st.session_state.get(_cache_ts_key, 0)
+    if cached is not None and (_time.time() - cached_ts) < _ttl:
+        return cached
+
     try:
         resp = _requests.get(_OPENROUTER_MODELS_URL, timeout=10)
         if resp.status_code != 200:
+            st.session_state[_cache_key] = []
+            st.session_state[_cache_ts_key] = _time.time()
             return []
         data = resp.json().get("data", [])
     except Exception:
+        st.session_state[_cache_key] = []
+        st.session_state[_cache_ts_key] = _time.time()
         return []
 
     candidatos = []
@@ -234,9 +253,11 @@ def _obtener_modelos_qwen_gratuitos() -> list:
         candidatos.append((mid, _extraer_parametros_b(mid)))
 
     # Ordenar: más parámetros primero; en empate, orden alfabético inverso
-    # (versiones más recientes suelen tener fecha mayor en el ID)
     candidatos.sort(key=lambda x: (x[1], x[0]), reverse=True)
-    return [mid for mid, _ in candidatos]
+    resultado = [mid for mid, _ in candidatos]
+    st.session_state[_cache_key] = resultado
+    st.session_state[_cache_ts_key] = _time.time()
+    return resultado
 
 
 def _resolver_modelo_ia() -> str:
@@ -2805,7 +2826,8 @@ def _mostrar_error_ia(resp, diagnostico_base=None, modo_diagnostico=False):
     elif tipo == "modelo_no_encontrado":
         # Forzar refresco del catálogo para que en la próxima consulta se elija
         # un modelo disponible (el nombre actual puede haber sido retirado).
-        _obtener_modelos_qwen_gratuitos.clear()
+        st.session_state.pop("_catalogo_qwen_cache", None)
+        st.session_state.pop("_catalogo_qwen_ts", None)
         st.warning(
             "⚠️ El modelo de IA configurado no está disponible en este momento "
             "(puede haber cambiado de nombre o estar temporalmente retirado). "
@@ -2930,7 +2952,9 @@ def _post_ia_con_reintento(mensajes, modo_diagnostico=False):
 
             if tipo == "modelo_no_encontrado":
                 # Modelo retirado: limpiar caché y pasar al siguiente sin esperar
-                _obtener_modelos_qwen_gratuitos.clear()
+                # Limpiar caché de catálogo para forzar redescubrimiento
+                st.session_state.pop("_catalogo_qwen_cache", None)
+                st.session_state.pop("_catalogo_qwen_ts", None)
                 break  # avanza al siguiente modelo
 
             if tipo in ("limite_temporal", "servicio_temporal"):
