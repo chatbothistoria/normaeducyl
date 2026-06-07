@@ -31,7 +31,27 @@ HISTORIAL_TURNOS      = 0      # seguridad jurídica: no arrastrar respuestas pr
 MAX_HISTORIAL_LOCAL   = 10
 COLLECTION_NAME       = "normativa"
 FAQ_FILE              = "faq_normativa.json"
-VERSION_APP           = "v073b"
+# Versión leída automáticamente desde VERSION (si existe) o desde git.
+# Así no hay que actualizarla manualmente en el código.
+def _leer_version_app() -> str:
+    import pathlib, subprocess
+    vfile = pathlib.Path(__file__).parent / "VERSION"
+    if vfile.exists():
+        v = vfile.read_text().strip()
+        if v:
+            return v
+    try:
+        v = subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            stderr=subprocess.DEVNULL, timeout=2
+        ).decode().strip()
+        if v:
+            return v
+    except Exception:
+        pass
+    return "v073b"
+
+VERSION_APP = _leer_version_app()
 FAQ_MATCH_MIN_RATIO   = 0.88
 FAQ_MATCH_MIN_COVER   = 0.78
 
@@ -91,41 +111,165 @@ def _limpiar(texto):
         texto = texto.replace(orig, repl)
     return texto.encode("latin-1", "replace").decode("latin-1")
 
+def _pdf_tabla_markdown(pdf, texto_tabla):
+    """Renderiza una tabla Markdown en el PDF con columnas proporcionales.
+
+    Detecta filas con | y las convierte en celdas visibles. La fila separadora
+    (---|---) se omite. Ajuste automático de ancho de columna.
+    """
+    filas = []
+    for linea in texto_tabla.splitlines():
+        linea = linea.strip()
+        if not linea or not "|" in linea:
+            continue
+        # Fila separadora de Markdown (---, :--:, etc.)
+        if all(c in "-|: " for c in linea):
+            continue
+        celdas = [c.strip() for c in linea.strip("|").split("|")]
+        filas.append(celdas)
+    if not filas:
+        return
+
+    num_cols = max(len(f) for f in filas)
+    page_w = pdf.w - pdf.l_margin - pdf.r_margin
+    # Primera columna más estrecha (nº fragmento), resto proporcional
+    col_w = [page_w * 0.10] + [page_w * 0.90 / max(num_cols - 1, 1)] * (num_cols - 1)
+
+    for idx_fila, fila in enumerate(filas):
+        # Calcular altura necesaria para la fila más alta
+        altura_fila = 6
+        for idx_col, celda in enumerate(fila):
+            w = col_w[idx_col] if idx_col < len(col_w) else col_w[-1]
+            n_lineas = len(textwrap.wrap(_limpiar(celda), max(1, int(w / 2.2))))
+            altura_fila = max(altura_fila, n_lineas * 5)
+
+        # Encabezado en negrita
+        if idx_fila == 0:
+            pdf.set_font("Helvetica", "B", 9)
+        else:
+            pdf.set_font("Helvetica", size=9)
+
+        x0 = pdf.get_x()
+        y0 = pdf.get_y()
+
+        for idx_col, celda in enumerate(fila):
+            w = col_w[idx_col] if idx_col < len(col_w) else col_w[-1]
+            pdf.set_xy(x0 + sum(col_w[:idx_col]), y0)
+            pdf.multi_cell(w, 5, _limpiar(celda), border=1)
+
+        pdf.set_xy(x0, y0 + altura_fila)
+
+    pdf.ln(3)
+
+
+def _pdf_escribir_respuesta(pdf, texto):
+    """Escribe el texto de respuesta interpretando secciones Markdown y tablas."""
+    en_tabla = []
+    for linea in texto.splitlines():
+        # Detectar inicio/fin de bloque de tabla
+        if "|" in linea and (linea.strip().startswith("|") or linea.count("|") >= 2):
+            en_tabla.append(linea)
+            continue
+        # Vaciar tabla acumulada si la línea actual no es tabla
+        if en_tabla:
+            _pdf_tabla_markdown(pdf, "\n".join(en_tabla))
+            en_tabla = []
+
+        linea_limpia = _limpiar(linea)
+
+        # Encabezados ## y ###
+        if linea_limpia.startswith("## "):
+            pdf.ln(3)
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.cell(0, 7, linea_limpia[3:], ln=True)
+            pdf.set_font("Helvetica", size=11)
+            continue
+        if linea_limpia.startswith("### "):
+            pdf.ln(2)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.cell(0, 6, linea_limpia[4:], ln=True)
+            pdf.set_font("Helvetica", size=11)
+            continue
+
+        # Listas con - o *
+        if linea_limpia.startswith("- ") or linea_limpia.startswith("* "):
+            for sublínea in textwrap.wrap("  • " + linea_limpia[2:], 88):
+                pdf.cell(0, 5, sublínea, ln=True)
+            continue
+
+        # Línea normal (puede contener **negrita** que simplificamos)
+        linea_limpia = linea_limpia.replace("**", "").replace("__", "")
+        if linea_limpia.strip():
+            for sublínea in textwrap.wrap(linea_limpia, 90):
+                pdf.cell(0, 5, sublínea, ln=True)
+        else:
+            pdf.ln(2)
+
+    # Tabla pendiente al final
+    if en_tabla:
+        _pdf_tabla_markdown(pdf, "\n".join(en_tabla))
+
+
 def generar_pdf(lista_interacciones, titulo="Normativa Educativa"):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+
+    # Cabecera
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, _limpiar(titulo), ln=True, align="C")
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.cell(0, 5, _limpiar(f"Generado por NormaEdu {VERSION_APP}"), ln=True, align="C")
     pdf.ln(8)
+
     for item in lista_interacciones:
+        # Pregunta
         pdf.set_font("Helvetica", "B", 12)
-        for linea in textwrap.wrap(f"PREGUNTA: {_limpiar(item['pregunta'])}", 80):
+        pdf.set_fill_color(230, 240, 255)
+        pdf.cell(0, 7, " CONSULTA", ln=True, fill=True)
+        pdf.set_font("Helvetica", size=11)
+        pdf.ln(1)
+        for linea in textwrap.wrap(_limpiar(item["pregunta"]), 88):
             pdf.cell(0, 6, linea, ln=True)
+
         corr = item.get("pregunta_corregida", "")
         if corr and corr.strip().lower() != item["pregunta"].strip().lower():
             pdf.set_font("Helvetica", "I", 10)
-            pdf.cell(0, 5, _limpiar(f"(Corregida a: {corr})"), ln=True)
-        pdf.ln(2)
-        pdf.set_font("Helvetica", size=11)
-        for linea in textwrap.wrap(_limpiar(item["respuesta"]), 90):
-            pdf.cell(0, 6, linea, ln=True)
-        pdf.ln(4)
-        pdf.set_font("Helvetica", "I", 10)
-        pdf.cell(0, 5, "FUENTES CONSULTADAS:", ln=True)
-        for fuente in item.get("fuentes", []):
-            for linea in textwrap.wrap(f"- {_limpiar(fuente)}", 90):
-                pdf.cell(0, 5, linea, ln=True)
+            pdf.cell(0, 5, _limpiar(f"(Texto revisado: {corr})"), ln=True)
 
+        pdf.ln(4)
+
+        # Respuesta con Markdown
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_fill_color(240, 255, 240)
+        pdf.cell(0, 7, " RESPUESTA", ln=True, fill=True)
+        pdf.set_font("Helvetica", size=11)
+        pdf.ln(1)
+        _pdf_escribir_respuesta(pdf, str(item.get("respuesta") or ""))
+
+        pdf.ln(4)
+
+        # Fuentes
+        fuentes = item.get("fuentes", [])
+        if fuentes:
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.cell(0, 6, "FUENTES CONSULTADAS:", ln=True)
+            pdf.set_font("Helvetica", "I", 10)
+            for fuente in fuentes:
+                for linea in textwrap.wrap(f"• {_limpiar(fuente)}", 88):
+                    pdf.cell(0, 5, linea, ln=True)
+
+        # Trazabilidad
         traza = item.get("trazabilidad")
         if traza:
             pdf.ln(2)
-            pdf.set_font("Helvetica", "I", 10)
+            pdf.set_font("Helvetica", "I", 9)
             for linea in formatear_trazabilidad_bloque(traza).splitlines():
                 for sublinea in textwrap.wrap(_limpiar(linea), 90):
-                    pdf.cell(0, 5, sublinea, ln=True)
+                    pdf.cell(0, 4, sublinea, ln=True)
 
-        pdf.ln(8)
+        pdf.ln(10)
+
     return bytes(pdf.output())
 
 # =============================================================================
@@ -1854,8 +1998,9 @@ def _intencion_ranking_v073(pregunta):
 def _reformulaciones_precision_v073(pregunta):
     """Reformulaciones locales, sin IA, para mejorar recuperación vectorial.
 
-    La app seguirá usando como máximo dos reformulaciones. Ponemos primero la
-    reformulación especializada para que entre en el promedio de embeddings.
+    Añade términos canónicos jurídicos que el usuario puede no haber escrito
+    pero que sí aparecen en los fragmentos de normativa. Sin coste, sin latencia.
+    La app usa como máximo dos reformulaciones; ponemos primero la más específica.
     """
     p = _normalizar_ranking_v073(pregunta)
     intent = _intencion_ranking_v073(pregunta)
@@ -1873,6 +2018,79 @@ def _reformulaciones_precision_v073(pregunta):
             "decreto 51 2007 derechos deberes alumnado"
         )
 
+    # Permisos y licencias docentes
+    if _ranking_contiene_v073(p, [
+        "permiso", "licencia", "dias libres", "dias por", "asuntos propios",
+        "asuntos particulares", "ausencia justificada",
+    ]):
+        refs.append(
+            "permiso retribuido licencia funcionario docente Castilla León días"
+        )
+
+    # Bajas y situaciones de incapacidad
+    if _ranking_contiene_v073(p, [
+        "baja medica", "baja laboral", "incapacidad temporal", "it docente",
+        "enfermedad docente", "baja por enfermedad",
+    ]):
+        refs.append(
+            "incapacidad temporal baja médica funcionario docente prestación"
+        )
+
+    # Conciliación familiar
+    if _ranking_contiene_v073(p, [
+        "conciliacion", "reduccion jornada", "cuidado hijo", "cuidado familiar",
+        "lactancia", "maternidad", "paternidad", "nacimiento hijo",
+    ]):
+        refs.append(
+            "conciliación vida laboral familiar reducción jornada docente"
+        )
+
+    # Ratio alumnos por aula
+    if _ranking_contiene_v073(p, [
+        "ratio", "alumnos por aula", "alumnos por clase",
+        "cuantos alumnos", "maximos alumnos", "numero maximo alumnos",
+    ]):
+        refs.append(
+            "ratio máximo alumnos por unidad aula etapa educativa Castilla León"
+        )
+
+    # Atención a la diversidad / NEE
+    if _ranking_contiene_v073(p, [
+        "nee", "necesidades educativas especiales", "necesidades especificas",
+        "adaptacion curricular", "aci", "acis", "diversidad",
+        "dificultad aprendizaje", "tdah", "tea", "discapacidad",
+    ]):
+        refs.append(
+            "atención diversidad necesidades específicas apoyo educativo adaptación curricular"
+        )
+
+    # Calendario y organización del curso
+    if _ranking_contiene_v073(p, [
+        "calendario escolar", "inicio curso", "fin de curso", "dias lectivos",
+        "festivos", "vacaciones escolares", "jornada escolar",
+    ]):
+        refs.append(
+            "calendario escolar días lectivos jornada escolar Castilla León"
+        )
+
+    # Reclamación de calificaciones (sin intent evaluacion_objetiva)
+    if intent != "evaluacion_objetiva" and _ranking_contiene_v073(p, [
+        "reclamar nota", "reclamar calificacion", "recurrir nota",
+        "impugnar calificacion", "revision calificacion",
+    ]):
+        refs.append(
+            "reclamación calificación procedimiento plazo resolución centro educativo"
+        )
+
+    # Absentismo escolar
+    if _ranking_contiene_v073(p, [
+        "absentismo", "faltas asistencia", "faltas injustificadas",
+        "inasistencia", "ausencias alumno",
+    ]):
+        refs.append(
+            "absentismo escolar faltas asistencia injustificadas protocolo actuación"
+        )
+
     base = re.sub(r"[¿?¡!]", "", pregunta or "").strip()
     if base and base not in refs:
         refs.append(base)
@@ -1880,11 +2098,117 @@ def _reformulaciones_precision_v073(pregunta):
     return refs
 
 
-def expandir_y_corregir(pregunta):
-    """Sin LLM para ahorrar tokens de IA.
-    La búsqueda semántica + reordenación local mantiene el coste en cero.
+# Diccionario de correcciones ortográficas frecuentes en consultas de normativa educativa.
+# Sin tildes, erratas comunes, abreviaciones y variantes coloquiales.
+# No usa IA ni APIs — coste cero y sin latencia añadida.
+_CORRECCIONES_ORTOGRAFICAS = {
+    # Tildes omitidas en términos jurídicos/educativos frecuentes
+    "evaluacion":       "evaluación",
+    "calificacion":     "calificación",
+    "calificaciones":   "calificaciones",
+    "promocion":        "promoción",
+    "titulacion":       "titulación",
+    "reclamacion":      "reclamación",
+    "reclamaciones":    "reclamaciones",
+    "autorizacion":     "autorización",
+    "autorizaciones":   "autorizaciones",
+    "atencion":         "atención",
+    "ensenanza":        "enseñanza",
+    "ensenanzas":       "enseñanzas",
+    "conciliacion":     "conciliación",
+    "reduccion":        "reducción",
+    "adaptacion":       "adaptación",
+    "orientacion":      "orientación",
+    "informacion":      "información",
+    "gestion":          "gestión",
+    "excedencia":       "excedencia",
+    "sustitucion":      "sustitución",
+    "resolucion":       "resolución",
+    "sancion":          "sanción",
+    "sanciones":        "sanciones",
+    "perdida":          "pérdida",
+    "numero":           "número",
+    "articulo":         "artículo",
+    "publica":          "pública",
+    "publico":          "público",
+    "academico":        "académico",
+    "academica":        "académica",
+    "didactica":        "didáctica",
+    "didactico":        "didáctico",
+    "pedagogico":       "pedagógico",
+    "basica":           "básica",
+    "basico":           "básico",
+    "especifica":       "específica",
+    "organica":         "orgánica",
+    "comun":            "común",
+    "ambito":           "ámbito",
+    "minimo":           "mínimo",
+    "minima":           "mínima",
+    "maximo":           "máximo",
+    "maxima":           "máxima",
+    "periodo":          "período",
+    "criterio":         "criterio",
+    "criterios":        "criterios",
+    "examen":           "examen",
+    "examenes":         "exámenes",
+    "medico":           "médico",
+    "medica":           "médica",
+    "psicologico":      "psicológico",
+    "practicas":        "prácticas",
+    "practica":         "práctica",
+    "tecnico":          "técnico",
+    "tecnica":          "técnica",
+    "juridico":         "jurídico",
+    "juridica":         "jurídica",
+    # Erratas comunes
+    "docuemento":       "documento",
+    "documetno":        "documento",
+    "curisso":          "curso",
+    "alumno":           "alumno",
+    "alumnos":          "alumnos",
+    # Abreviaciones/coloquialismos frecuentes en búsquedas
+    "prof":             "profesor",
+    "profe":            "profesor",
+    "mates":            "matemáticas",
+    "insti":            "instituto",
+    "cole":             "colegio",
+}
+
+def _corregir_ortografia_local(pregunta: str) -> str:
+    """Corrige erratas y tildes omitidas frecuentes en consultas de normativa educativa.
+
+    Opera palabra a palabra para no alterar el significado. Sin IA, sin APIs.
+    Solo corrige si la palabra completa (ignorando mayúsculas) está en el diccionario.
     """
-    corregida = pregunta.strip()
+    palabras = pregunta.split()
+    corregidas = []
+    hubo_cambio = False
+    for palabra in palabras:
+        # Preservar puntuación al inicio/final de la palabra
+        prefijo = ""
+        sufijo = ""
+        p = palabra
+        while p and not p[0].isalpha():
+            prefijo += p[0]
+            p = p[1:]
+        while p and not p[-1].isalpha():
+            sufijo = p[-1] + sufijo
+            p = p[:-1]
+        correccion = _CORRECCIONES_ORTOGRAFICAS.get(p.lower())
+        if correccion:
+            # Mantener mayúsculas si la original las tenía
+            if p[0].isupper() if p else False:
+                correccion = correccion[0].upper() + correccion[1:]
+            corregidas.append(prefijo + correccion + sufijo)
+            hubo_cambio = True
+        else:
+            corregidas.append(palabra)
+    return " ".join(corregidas) if hubo_cambio else pregunta
+
+
+def expandir_y_corregir(pregunta):
+    """Corrección ortográfica local + reformulaciones semánticas. Sin LLM, coste cero."""
+    corregida = _corregir_ortografia_local(pregunta.strip())
     return corregida, _reformulaciones_precision_v073(corregida)
 
 
@@ -3547,7 +3871,13 @@ if submit and pregunta_input:
                         for f in fuentes_u:
                             st.markdown(f"- 📄 {f}", unsafe_allow_html=False)
                         st.caption(formatear_trazabilidad_compacta(trazabilidad))
-
+                        # Modelo realmente usado: último intento con HTTP 200
+                        _modelo_usado = next(
+                            (i["modelo"] for i in reversed(_intentos_ia) if i.get("http_status") == 200),
+                            _resolver_modelo_ia()
+                        )
+                        if st.session_state.get("admin_diagnostico_ok"):
+                            st.caption(f"🤖 Modelo IA: `{_modelo_usado}`")
                         diagnostico = {
                             "version": VERSION_APP,
                             "capa_usada": ruta_trazabilidad,
@@ -3555,6 +3885,7 @@ if submit and pregunta_input:
                             "consume_ia": True,
                             "bloque_seleccionado": bloque_elegido,
                             "faq_id": None,
+                            "modelo_ia_usado": _modelo_usado,
                             "resultados_enviados_llm": len(resultados),
                             "fragmentos": _diagnostico_fragmentos(resultados),
                             "contexto_chars": len(contexto_xml),
