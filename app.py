@@ -132,7 +132,7 @@ def _pdf_tabla_markdown(pdf, texto_tabla):
 
     num_cols = max(len(f) for f in filas)
     page_w = pdf.w - pdf.l_margin - pdf.r_margin
-    # Primera columna más estrecha (nº fragmento), resto proporcional
+    # Primera columna mas estrecha (num fragmento), resto proporcional
     col_w = [page_w * 0.10] + [page_w * 0.90 / max(num_cols - 1, 1)] * (num_cols - 1)
 
     for idx_fila, fila in enumerate(filas):
@@ -193,15 +193,15 @@ def _pdf_escribir_respuesta(pdf, texto):
 
         # Listas con - o *
         if linea_limpia.startswith("- ") or linea_limpia.startswith("* "):
-            for sublínea in textwrap.wrap("  • " + linea_limpia[2:], 88):
-                pdf.cell(0, 5, sublínea, ln=True)
+            for sublinea in textwrap.wrap("  - " + linea_limpia[2:], 88):
+                pdf.cell(0, 5, sublinea, ln=True)
             continue
 
         # Línea normal (puede contener **negrita** que simplificamos)
         linea_limpia = linea_limpia.replace("**", "").replace("__", "")
         if linea_limpia.strip():
-            for sublínea in textwrap.wrap(linea_limpia, 90):
-                pdf.cell(0, 5, sublínea, ln=True)
+            for sublinea in textwrap.wrap(linea_limpia, 90):
+                pdf.cell(0, 5, sublinea, ln=True)
         else:
             pdf.ln(2)
 
@@ -256,7 +256,7 @@ def generar_pdf(lista_interacciones, titulo="Normativa Educativa"):
             pdf.cell(0, 6, "FUENTES CONSULTADAS:", ln=True)
             pdf.set_font("Helvetica", "I", 10)
             for fuente in fuentes:
-                for linea in textwrap.wrap(f"• {_limpiar(fuente)}", 88):
+                for linea in textwrap.wrap(f"- {_limpiar(fuente)}", 88):
                     pdf.cell(0, 5, linea, ln=True)
 
         # Trazabilidad
